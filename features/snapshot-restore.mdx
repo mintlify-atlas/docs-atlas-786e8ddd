@@ -1,0 +1,162 @@
+---
+title: "Snapshot & Restore"
+description: "Take a point-in-time snapshot of a paused Cloud Hypervisor VM and restore it to an identical running state, enabling fast VM cloning and live upgrade workflows."
+---
+
+The snapshot and restore feature allows you to capture the complete state of a paused virtual machine and later restore it to an identical running instance. Snapshots capture CPU state, memory contents, device state, and VM configuration. The restored VM starts in a paused state, matching the state it was in when the snapshot was taken.
+
+Common use cases include:
+
+- **Fast cloning**: Spawn multiple identical VMs from a single snapshot without booting each from scratch.
+- **Checkpoint/restore**: Save VM state before a risky operation and roll back if needed.
+- **VMM live upgrade**: Migrate a VM's state to a new VMM version without downtime (see also [Live Migration](/features/live-migration)).
+
+<Warning>
+  VFIO passthrough devices are not supported by snapshot/restore. VMs using VFIO-assigned devices cannot be snapshotted.
+</Warning>
+
+<Warning>
+  Snapshots are not guaranteed to be compatible across different Cloud Hypervisor versions. Always restore with the same version used to create the snapshot.
+</Warning>
+
+---
+
+## Snapshot a VM
+
+<Steps>
+  <Step title="Start the VM with an API socket">
+    Launch Cloud Hypervisor with `--api-socket` so the HTTP API is reachable:
+
+    ```bash
+    ./cloud-hypervisor \
+        --api-socket /tmp/cloud-hypervisor.sock \
+        --cpus boot=4 \
+        --memory size=4G \
+        --kernel vmlinux \
+        --cmdline "root=/dev/vda1 console=hvc0 rw" \
+        --disk path=focal-server-cloudimg-amd64.raw
+    ```
+  </Step>
+
+  <Step title="Pause the VM">
+    A snapshot must be taken from a paused VM to guarantee a consistent state:
+
+    ```bash
+    ./ch-remote --api-socket=/tmp/cloud-hypervisor.sock pause
+    ```
+  </Step>
+
+  <Step title="Take the snapshot">
+    Snapshot the VM to a directory on the host. The directory must already exist:
+
+    ```bash
+    ./ch-remote --api-socket=/tmp/cloud-hypervisor.sock snapshot file:///home/foo/snapshot
+    ```
+
+    The snapshot directory will contain three files:
+
+    ```
+    /home/foo/snapshot/
+    ├── config.json      # VM configuration (CPUs, RAM, devices)
+    ├── memory-ranges    # Full guest RAM contents
+    └── state.json       # Per-component device and CPU state
+    ```
+
+    | File | Description |
+    |---|---|
+    | `config.json` | Human-readable VM configuration. Can be edited between snapshot and restore for special use cases, but this is generally not needed. |
+    | `memory-ranges` | Raw guest RAM image. May be several GiB depending on VM memory size. |
+    | `state.json` | Complete device and CPU state used to reconstruct the VM exactly. |
+  </Step>
+</Steps>
+
+---
+
+## Restore a VM
+
+<Steps>
+  <Step title="Restore from snapshot">
+    <Tabs>
+      <Tab title="Single command">
+        Pass `--restore` directly to `cloud-hypervisor`:
+
+        ```bash
+        ./cloud-hypervisor \
+            --api-socket /tmp/cloud-hypervisor.sock \
+            --restore source_url=file:///home/foo/snapshot
+        ```
+      </Tab>
+      <Tab title="Two-step (separate terminals)">
+        Start the VMM process in one terminal, then issue the restore command from another:
+
+        ```bash
+        # Terminal 1 — start the VMM
+        ./cloud-hypervisor --api-socket /tmp/cloud-hypervisor.sock
+        ```
+
+        ```bash
+        # Terminal 2 — restore from snapshot
+        ./ch-remote --api-socket=/tmp/cloud-hypervisor.sock \
+            restore source_url=file:///home/foo/snapshot
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Resume the VM">
+    The restored VM starts in a `paused` state. Resume it explicitly before use:
+
+    ```bash
+    ./ch-remote --api-socket=/tmp/cloud-hypervisor.sock resume
+    ```
+
+    Alternatively, pass `resume=true` to the restore command to resume automatically:
+
+    ```bash
+    ./cloud-hypervisor \
+        --api-socket /tmp/cloud-hypervisor.sock \
+        --restore source_url=file:///home/foo/snapshot,resume=true
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Memory Restore Modes
+
+By default, Cloud Hypervisor copies the full `memory-ranges` file into guest RAM before the restore completes (`copy` mode). An alternative on-demand mode is available:
+
+```bash
+./cloud-hypervisor \
+    --api-socket /tmp/cloud-hypervisor.sock \
+    --restore source_url=file:///home/foo/snapshot,memory_restore_mode=ondemand
+```
+
+| Mode | Behavior |
+|---|---|
+| `copy` (default) | Full memory image is loaded into guest RAM before restore completes. Simple and always available. |
+| `ondemand` | Uses `userfaultfd` to fault snapshot pages into guest RAM on first access. Restore completes faster but page faults are incurred at runtime. |
+
+<Note>
+  `memory_restore_mode=ondemand` has the following constraints:
+  - `prefault=on` is not supported alongside this mode.
+  - The snapshot memory ranges must be page-aligned.
+  - If `userfaultfd` cannot be enabled, restore fails rather than falling back to `copy`.
+</Note>
+
+---
+
+## Restoring VMs with Explicit Net FDs
+
+For VMs created with file descriptors explicitly passed to `NetConfig`, valid FDs must be re-supplied at restore time:
+
+```bash
+# Terminal 1
+./cloud-hypervisor --api-socket /tmp/cloud-hypervisor.sock
+
+# Terminal 2
+./ch-remote --api-socket=/tmp/cloud-hypervisor.sock \
+    restore source_url=file:///home/foo/snapshot net_fds=[net1@[23,24],net2@[25,26]]
+```
+
+In this example, the network device with ID `net1` is backed by FDs 23 and 24, and `net2` by FDs 25 and 26.

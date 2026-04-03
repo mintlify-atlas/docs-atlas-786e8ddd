@@ -1,0 +1,458 @@
+---
+title: "cloud-hypervisor CLI"
+description: "Complete reference for all cloud-hypervisor command-line flags and options."
+---
+
+The `cloud-hypervisor` binary is the main VMM process. You launch it once per VM, passing all configuration on the command line. Once running, you can manage the VM via the REST API using `ch-remote`.
+
+```bash
+cloud-hypervisor [OPTIONS]
+```
+
+<Note>
+  Grant the binary `NET_ADMIN` capability to allow automatic TAP interface creation:
+  ```bash
+  sudo setcap cap_net_admin+ep ./cloud-hypervisor
+  ```
+</Note>
+
+## VM payload
+
+<ParamField path="--kernel" type="path">
+  Path to the guest kernel image. For x86-64: an ELF `vmlinux` (compiled with PVH support) or a `bzImage`. For AArch64: an `Image` file.
+
+  ```bash
+  --kernel ./linux/arch/x86/boot/compressed/vmlinux.bin
+  ```
+</ParamField>
+
+<ParamField path="--firmware" type="path">
+  Path to firmware loaded in an architecture-specific way. Supports Rust Hypervisor Firmware (`hypervisor-fw`) and edk2 UEFI firmware (`CLOUDHV.fd` / `CLOUDHV_EFI.fd`). Mutually exclusive with `--kernel` for the boot payload.
+
+  ```bash
+  --firmware ./hypervisor-fw
+  ```
+</ParamField>
+
+<ParamField path="--cmdline" type="string">
+  Kernel command line string passed to the guest kernel.
+
+  ```bash
+  --cmdline "console=hvc0 root=/dev/vda1 rw"
+  ```
+</ParamField>
+
+<ParamField path="--initramfs" type="path">
+  Path to an initramfs/initrd image to load into guest memory.
+
+  ```bash
+  --initramfs ./initrd.img
+  ```
+</ParamField>
+
+## CPU
+
+<ParamField path="--cpus" type="string">
+  CPU configuration. All sub-parameters are optional except `boot`.
+
+  ```
+  boot=<n>,max=<n>,topology=<threads>:<cores>:<dies>:<packages>,
+  kvm_hyperv=on|off,max_phys_bits=<n>,affinity=<list>,
+  features=<list>,nested=on|off,core_scheduling=vm|vcpu|off
+  ```
+
+  | Sub-parameter | Description | Default |
+  |---|---|---|
+  | `boot` | Number of vCPUs at boot | `1` |
+  | `max` | Maximum vCPUs (for hotplug) | same as `boot` |
+  | `topology` | CPU topology as `threads:cores:dies:packages` | — |
+  | `kvm_hyperv` | Expose Hyper-V emulation to guest | `off` |
+  | `max_phys_bits` | Maximum physical address bits | host value |
+  | `affinity` | Pin vCPUs to host CPU sets | — |
+  | `features` | Enable CPU features (e.g. `amx`) | — |
+  | `nested` | Enable nested virtualisation | `off` |
+  | `core_scheduling` | Core scheduling granularity | `off` |
+
+  ```bash
+  --cpus boot=4,max=8
+  --cpus boot=2,topology=1:2:1:1
+  ```
+</ParamField>
+
+## Memory
+
+<ParamField path="--memory" type="string">
+  Guest memory configuration.
+
+  ```
+  size=<size>[,mergeable=on|off][,shared=on|off][,hugepages=on|off]
+  [,hugepage_size=<size>][,hotplug_method=acpi|virtio-mem]
+  [,hotplug_size=<size>][,hotplugged_size=<size>]
+  [,prefault=on|off][,thp=on|off]
+  ```
+
+  | Sub-parameter | Description | Default |
+  |---|---|---|
+  | `size` | Total guest RAM | `512M` |
+  | `mergeable` | Mark pages as KSM-mergeable | `off` |
+  | `shared` | Use shared (MAP_SHARED) memory — required for live migration | `off` |
+  | `hugepages` | Use huge pages | `off` |
+  | `hugepage_size` | Huge page size | system default |
+  | `hotplug_method` | Method for memory hotplug: `acpi` or `virtio-mem` | `acpi` |
+  | `hotplug_size` | Address space reserved for hotplug | — |
+  | `hotplugged_size` | Initial hotplugged memory (for restore) | — |
+  | `prefault` | Pre-fault all guest memory at boot | `off` |
+  | `thp` | Enable transparent huge pages | `on` |
+
+  ```bash
+  --memory size=2G
+  --memory size=1G,hugepages=on
+  --memory size=1G,hotplug_method=acpi,hotplug_size=8G
+  ```
+</ParamField>
+
+<ParamField path="--memory-zone" type="string">
+  Define a named memory zone with fine-grained control over NUMA, host NUMA affinity, and hotplug. Can be specified multiple times.
+
+  ```bash
+  --memory-zone id=mem0,size=1G,host_numa_node=0
+  ```
+</ParamField>
+
+## Storage
+
+<ParamField path="--disk" type="string">
+  Attach a block device. Can be specified multiple times.
+
+  ```
+  path=<path>[,readonly=on|off][,direct=on|off][,iommu=on|off]
+  [,num_queues=<n>][,queue_size=<n>][,vhost_user=on|off]
+  [,socket=<path>][,id=<id>][,pci_segment=<n>]
+  ```
+
+  ```bash
+  --disk path=./ubuntu.raw
+  --disk path=./data.img,readonly=on
+  --disk vhost_user=on,socket=/tmp/vhost-blk.sock
+  ```
+</ParamField>
+
+<ParamField path="--pmem" type="string">
+  Attach a persistent memory (virtio-pmem) device. Can be specified multiple times.
+
+  ```
+  file=<path>[,size=<size>][,iommu=on|off][,discard_writes=on|off]
+  [,id=<id>][,pci_segment=<n>]
+  ```
+
+  ```bash
+  --pmem file=./nvdimm.img,size=512M
+  ```
+</ParamField>
+
+## Networking
+
+<ParamField path="--net" type="string">
+  Attach a network device. Can be specified multiple times.
+
+  ```
+  [tap=<name>][,ip=<ip>][,mask=<mask>][,mac=<mac>]
+  [,iommu=on|off][,num_queues=<n>][,queue_size=<n>]
+  [,vhost_user=on|off][,socket=<path>][,id=<id>]
+  [,pci_segment=<n>]
+  ```
+
+  ```bash
+  --net tap=,mac=,ip=192.168.10.10,mask=255.255.255.0
+  --net vhost_user=on,socket=/tmp/vhost-net.sock
+  ```
+</ParamField>
+
+## Filesystem sharing
+
+<ParamField path="--fs" type="string">
+  Attach a virtio-fs shared filesystem device. Requires a running `virtiofsd` daemon. Can be specified multiple times.
+
+  ```
+  tag=<tag>,socket=<path>[,num_queues=<n>][,queue_size=<n>]
+  [,id=<id>][,pci_segment=<n>]
+  ```
+
+  ```bash
+  --fs tag=myfs,socket=/tmp/virtiofsd.sock
+  ```
+</ParamField>
+
+## Vsock
+
+<ParamField path="--vsock" type="string">
+  Attach a virtio-vsock device for host/guest communication.
+
+  ```
+  cid=<cid>,socket=<path>[,iommu=on|off][,id=<id>]
+  ```
+
+  ```bash
+  --vsock cid=3,socket=/tmp/vsock.sock
+  ```
+</ParamField>
+
+## Device passthrough
+
+<ParamField path="--device" type="string">
+  Pass a VFIO PCI device through to the guest. Can be specified multiple times.
+
+  ```
+  path=<sysfs_path>[,iommu=on|off][,id=<id>][,pci_segment=<n>]
+  ```
+
+  ```bash
+  --device path=/sys/bus/pci/devices/0000:01:00.0/
+  ```
+</ParamField>
+
+<ParamField path="--user-device" type="string">
+  Attach a userspace PCI device (vfio-user protocol).
+
+  ```
+  socket=<path>[,id=<id>][,pci_segment=<n>]
+  ```
+</ParamField>
+
+<ParamField path="--vdpa" type="string">
+  Attach a vDPA device. Can be specified multiple times.
+
+  ```
+  path=<path>,num_queues=<n>[,iommu=on|off][,id=<id>][,pci_segment=<n>]
+  ```
+</ParamField>
+
+<ParamField path="--generic-vhost-user" type="string">
+  Attach a generic vhost-user device. Can be specified multiple times.
+
+  ```
+  socket=<path>,num_queues=<n>[,id=<id>][,pci_segment=<n>]
+  ```
+</ParamField>
+
+## Console & serial
+
+<ParamField path="--console" type="string">
+  Configure the virtio-console device.
+
+  ```
+  off|null|pty|tty|file=</path/to/file>[,iommu=on|off]
+  ```
+
+  | Value | Description |
+  |---|---|
+  | `off` | Disable virtio-console |
+  | `null` | Discard console output |
+  | `tty` | Use the host's current terminal (default) |
+  | `pty` | Allocate a PTY |
+  | `file=<path>` | Write output to a file |
+
+  Default: `tty`
+</ParamField>
+
+<ParamField path="--serial" type="string">
+  Configure the legacy serial port.
+
+  ```
+  off|null|pty|tty|file=</path/to/file>|socket=</path/to/file>
+  ```
+
+  Default: `off`
+</ParamField>
+
+## RNG & balloon
+
+<ParamField path="--rng" type="string">
+  Configure the virtio-rng entropy source. Default source is `/dev/urandom`.
+
+  ```bash
+  --rng src=/dev/urandom
+  ```
+</ParamField>
+
+<ParamField path="--balloon" type="string">
+  Attach a virtio-balloon device for dynamic memory management.
+
+  ```
+  size=<size>[,deflate_on_oom=on|off][,free_page_reporting=on|off]
+  ```
+
+  ```bash
+  --balloon size=0
+  ```
+</ParamField>
+
+## Restore
+
+<ParamField path="--restore" type="string">
+  Restore a VM from a previously taken snapshot. Use instead of `--kernel`/`--firmware` to boot from snapshot.
+
+  ```
+  source_url=file://<path>[,prefault=on|off]
+  ```
+
+  ```bash
+  --restore source_url=file:///home/user/vm-snapshot
+  ```
+</ParamField>
+
+## NUMA & PCI topology
+
+<ParamField path="--numa" type="string">
+  Define a NUMA node for guest topology. Can be specified multiple times.
+
+  ```
+  id=<n>[,cpus=<list>][,distances=<target>:<distance>][,memory_zones=<list>][,sgx_epc_sections=<list>]
+  ```
+</ParamField>
+
+<ParamField path="--pci-segment" type="string">
+  Configure an additional PCI segment. Can be specified multiple times.
+
+  ```
+  pci_segment=<id>
+  ```
+</ParamField>
+
+## Rate limiting
+
+<ParamField path="--rate-limit-group" type="string">
+  Define a shared I/O rate limit group that can be referenced by disk devices. Can be specified multiple times.
+
+  ```
+  id=<id>,bw_size=<bytes>,bw_refill_time=<ms>[,ops_size=<ops>,ops_refill_time=<ms>]
+  ```
+</ParamField>
+
+## D-Bus API
+
+<ParamField path="--dbus-service-name" type="string">
+  Well-known D-Bus service name. Enables the D-Bus API (requires `dbus_api` feature at build time).
+
+  ```bash
+  --dbus-service-name "org.cloudhypervisor.DBusApi"
+  ```
+</ParamField>
+
+<ParamField path="--dbus-object-path" type="string">
+  D-Bus object path for the API interface.
+
+  ```bash
+  --dbus-object-path "/org/cloudhypervisor/DBusApi"
+  ```
+</ParamField>
+
+<ParamField path="--dbus-system-bus" type="flag">
+  Use the system D-Bus instead of the session bus.
+</ParamField>
+
+## API socket
+
+<ParamField path="--api-socket" type="string">
+  Enable the REST API on a UNIX domain socket. Required for `ch-remote` to connect.
+
+  ```
+  path=</path/to/socket>  or  fd=<fd>
+  ```
+
+  ```bash
+  --api-socket path=/tmp/cloud-hypervisor.sock
+  ```
+</ParamField>
+
+## Security
+
+<ParamField path="--seccomp" type="true|false|log">
+  Control seccomp syscall filtering. Default: `true` (enabled).
+
+  | Value | Description |
+  |---|---|
+  | `true` | Enable seccomp filtering (default) |
+  | `false` | Disable filtering (development only) |
+  | `log` | Log blocked syscalls instead of killing the process |
+</ParamField>
+
+## Miscellaneous
+
+<ParamField path="--event-monitor" type="string">
+  Write VM lifecycle events to a file or fd.
+
+  ```bash
+  --event-monitor path=/tmp/events.json
+  ```
+</ParamField>
+
+<ParamField path="--log-file" type="path">
+  Write log output to a file instead of stderr.
+</ParamField>
+
+<ParamField path="-v" type="flag">
+  Increase log verbosity. Use `-v` for info, `-vv` for debug, `-vvv` for trace.
+</ParamField>
+
+<ParamField path="--version" type="flag">
+  Print the Cloud Hypervisor version and exit.
+</ParamField>
+
+<ParamField path="--watchdog" type="flag">
+  Enable a virtio-watchdog device in the guest.
+</ParamField>
+
+<ParamField path="--tpm" type="string">
+  Attach a TPM 2.0 device via a socket (required for Windows 11).
+
+  ```bash
+  --tpm socket=/tmp/swtpm.sock
+  ```
+</ParamField>
+
+## Common examples
+
+<CodeGroup>
+
+```bash Firmware boot (Ubuntu)
+./cloud-hypervisor \
+  --firmware ./hypervisor-fw \
+  --disk path=focal-server-cloudimg-amd64.raw \
+  --cpus boot=4 \
+  --memory size=1024M \
+  --net "tap=,mac=,ip=,mask="
+```
+
+```bash Direct kernel boot (x86-64)
+./cloud-hypervisor \
+  --kernel ./linux/arch/x86/boot/compressed/vmlinux.bin \
+  --disk path=focal-server-cloudimg-amd64.raw \
+  --cmdline "console=hvc0 root=/dev/vda1 rw" \
+  --cpus boot=4 \
+  --memory size=1024M \
+  --net "tap=,mac=,ip=,mask="
+```
+
+```bash With REST API socket
+./cloud-hypervisor \
+  --kernel ./vmlinux.bin \
+  --disk path=ubuntu.raw \
+  --cmdline "console=hvc0 root=/dev/vda1 rw" \
+  --cpus boot=2,max=8 \
+  --memory size=1G,hotplug_size=8G \
+  --api-socket path=/tmp/cloud-hypervisor.sock
+```
+
+```bash Windows (UEFI)
+./cloud-hypervisor \
+  --firmware ./CLOUDHV.fd \
+  --disk path=windows-disk.raw \
+  --cpus boot=4,kvm_hyperv=on \
+  --memory size=4G \
+  --net "tap=,mac=,ip=,mask=" \
+  --serial tty \
+  --console off
+```
+
+</CodeGroup>

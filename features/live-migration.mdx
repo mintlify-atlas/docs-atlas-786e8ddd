@@ -1,0 +1,203 @@
+---
+title: "Live Migration"
+description: "Migrate a running Cloud Hypervisor VM between VMM instances locally (UNIX socket) or across the network (TCP) with minimal downtime."
+---
+
+Cloud Hypervisor supports live migration of running VMs between VMM instances. The VM continues running on the source while memory is transferred to the destination, with a brief pause only at the final cutover. Two transport modes are available:
+
+- **Local migration** (UNIX socket): Both source and destination run on the same host. Useful for live upgrades of the VMM binary.
+- **Remote migration** (TCP): Source and destination run on different machines connected over a network.
+
+<Warning>
+  Live migration is **not supported across different Cloud Hypervisor versions**. Both the source and destination VMM must run the same version.
+</Warning>
+
+<Warning>
+  The examples below place sockets in `/tmp` for simplicity. Do not use `/tmp` for sockets in production environments.
+</Warning>
+
+---
+
+## Local Migration (UNIX Socket)
+
+Local migration transfers a VM between two Cloud Hypervisor processes on the same host over a UNIX domain socket. This is the recommended approach for VMM live upgrades.
+
+<Note>
+  Local migration requires the VM's memory to be configured with `shared=on`, or to use hugepages. This allows the migration to reference shared memory rather than copying it.
+</Note>
+
+<Steps>
+  <Step title="Launch the source VM">
+    Start the VM you want to migrate:
+
+    ```console
+    $ target/release/cloud-hypervisor \
+        --kernel ~/workloads/vmlinux \
+        --disk path=~/workloads/focal.raw \
+        --cpus boot=1 --memory size=1G,shared=on \
+        --cmdline "root=/dev/vda1 console=ttyS0" \
+        --serial tty --console off --api-socket=/tmp/api1
+    ```
+  </Step>
+
+  <Step title="Launch the destination VMM">
+    Start an empty Cloud Hypervisor process for the destination. No VM configuration is needed — it will be received as part of the migration:
+
+    ```console
+    $ target/release/cloud-hypervisor --api-socket=/tmp/api2
+    ```
+  </Step>
+
+  <Step title="Prepare the destination to receive migration">
+    Configure the destination VMM to listen for an incoming migration on a UNIX socket:
+
+    ```console
+    $ target/release/ch-remote --api-socket=/tmp/api2 receive-migration unix:/tmp/sock
+    ```
+  </Step>
+
+  <Step title="Initiate migration from the source">
+    Send the migration from the source VM. The `local=true` flag tells the VMM that both ends share the same host memory:
+
+    ```console
+    $ target/release/ch-remote --api-socket=/tmp/api1 \
+        send-migration destination_url=unix:/tmp/sock,local=true
+    ```
+
+    When complete, the destination VM is running and the source VM is terminated gracefully.
+  </Step>
+</Steps>
+
+---
+
+## Remote Migration (TCP)
+
+Remote migration transfers a VM between two machines over the network. Two sub-methods are available: tunneling a UNIX socket through `socat`, or using a direct TCP socket.
+
+### Preparation
+
+Ensure both machines (`src` and `dst`) can reach each other over the network. Place the kernel and initramfs in the **same path** on both machines:
+
+```console
+src $ export DEBIAN=https://ftp.debian.org/debian/dists/stable/main/installer-amd64/current/images/netboot/debian-installer/amd64
+src $ mkdir -p /var/images
+src $ curl $DEBIAN/linux > /var/images/linux
+src $ curl $DEBIAN/initrd.gz > /var/images/initrd
+```
+
+Repeat on the destination host.
+
+<Tabs>
+  <Tab title="TCP Socket (direct)">
+    The simplest approach for remote migration. Consider that migration traffic is unencrypted — only use this on a trusted network.
+
+    <Steps>
+      <Step title="Start the destination VMM">
+        ```console
+        dst $ cloud-hypervisor --api-socket /tmp/api
+        ```
+      </Step>
+
+      <Step title="Prepare to receive migration on the destination">
+        Listen on a TCP port for the incoming migration:
+
+        ```console
+        dst $ ch-remote --api-socket=/tmp/api receive-migration tcp:0.0.0.0:{port}
+        ```
+      </Step>
+
+      <Step title="Start the source VM">
+        ```console
+        src $ cloud-hypervisor \
+                --serial tty --console off \
+                --cpus boot=2 --memory size=4G \
+                --kernel /var/images/linux \
+                --initramfs /var/images/initrd \
+                --cmdline "console=ttyS0" \
+                --api-socket /tmp/api
+        ```
+      </Step>
+
+      <Step title="Initiate the migration">
+        ```console
+        src $ ch-remote --api-socket=/tmp/api \
+                send-migration destination_url=tcp:{dst}:{port}
+        ```
+
+        Replace `{dst}:{port}` with the destination's IP address and the port configured above.
+
+        When complete, the VM is running on the destination and the source instance terminates normally. All ongoing processes and connections within the VM remain intact.
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="UNIX Socket via socat (tunneled)">
+    This approach tunnels UNIX socket migration traffic through `socat` over TCP, which can be useful when TCP migration is not directly supported by the network path.
+
+    <Steps>
+      <Step title="Start the destination VMM">
+        ```console
+        dst $ cloud-hypervisor --api-socket /tmp/api
+        ```
+      </Step>
+
+      <Step title="Prepare the destination to receive migration">
+        ```console
+        dst $ ch-remote --api-socket=/tmp/api receive-migration unix:/tmp/sock
+        ```
+      </Step>
+
+      <Step title="Forward TCP connections to the UNIX socket on the destination">
+        ```console
+        dst $ socat TCP-LISTEN:{port},reuseaddr UNIX-CLIENT:/tmp/sock
+        ```
+      </Step>
+
+      <Step title="Start the source VM">
+        ```console
+        src $ cloud-hypervisor \
+                --serial tty --console off \
+                --cpus boot=2 --memory size=4G \
+                --kernel /var/images/linux \
+                --initramfs /var/images/initrd \
+                --cmdline "console=ttyS0" \
+                --api-socket /tmp/api
+        ```
+      </Step>
+
+      <Step title="Forward the UNIX socket to the destination on the source">
+        ```console
+        src $ socat UNIX-LISTEN:/tmp/sock,reuseaddr TCP:{dst}:{port}
+        ```
+
+        Replace `{dst}:{port}` with the destination's IP address and port.
+      </Step>
+
+      <Step title="Initiate the migration">
+        ```console
+        src $ ch-remote --api-socket=/tmp/api send-migration unix:/tmp/sock
+        ```
+
+        When complete, the VM is running on the destination without workload interruption.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+---
+
+## Migration Parameters
+
+For TCP migrations, additional parameters control the migration process. Pass them to `send-migration`:
+
+```console
+src $ ch-remote --api-socket=/tmp/api \
+    send-migration destination_url=tcp:{dst}:{port},downtime_ms=200,timeout_s=3600,timeout_strategy=cancel
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `downtime_ms` | `300` | Target maximum VM downtime during cutover, in milliseconds. |
+| `timeout_s` | `3600` | Maximum total migration duration in seconds before the timeout strategy is applied. |
+| `timeout_strategy` | `cancel` | Action when timeout is reached: `cancel` aborts and keeps the VM running on the source; `ignore` proceeds regardless of downtime. |
+| `connections` | `1` | Number of parallel TCP connections for migration (1–128). Not supported with UNIX socket migration. |

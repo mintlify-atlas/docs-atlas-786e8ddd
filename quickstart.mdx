@@ -1,80 +1,276 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Get Cloud Hypervisor running in minutes using pre-built binaries and a standard Ubuntu cloud image."
 ---
 
-## Get started in three steps
+This guide walks you through booting your first VM with Cloud Hypervisor. The fastest path uses pre-built static binaries from GitHub Releases — no compilation required.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+- A Linux host running kernel **5.13 or newer** (5.15 recommended; this is what CI tests against)
+- KVM enabled: `/dev/kvm` must exist and be accessible
+- For AArch64: a server or development board with a **GICv3** interrupt controller
+- `qemu-img` installed for disk image conversion: `sudo apt install qemu-utils`
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
+  <Step title="Download the Cloud Hypervisor binary">
+    Pre-built static binaries are published with every release on GitHub. Download the binary for your architecture:
 
-### Step 2: Deploy your changes
+    <Tabs>
+      <Tab title="x86-64">
+        ```bash
+        wget https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download/cloud-hypervisor-static
+        chmod +x cloud-hypervisor-static
+        sudo setcap cap_net_admin+ep ./cloud-hypervisor-static
+        ```
+      </Tab>
+      <Tab title="AArch64">
+        ```bash
+        wget https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest/download/cloud-hypervisor-static-aarch64
+        chmod +x cloud-hypervisor-static-aarch64
+        sudo setcap cap_net_admin+ep ./cloud-hypervisor-static-aarch64
+        ```
+      </Tab>
+    </Tabs>
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    The `setcap` command grants the binary the `NET_ADMIN` capability so it can configure TAP network interfaces on the host without running as root.
+  </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+  <Step title="Boot with firmware">
+    Cloud Hypervisor can boot a standard Ubuntu cloud image directly using the Rust Hypervisor Firmware (`hypervisor-fw`). This is the simplest way to get a VM running.
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    Download an Ubuntu cloud image, convert it to raw format, and fetch the firmware:
 
-### Step 3: Go live
+    <Tabs>
+      <Tab title="x86-64">
+        ```bash
+        # Download Ubuntu Focal cloud image
+        wget https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+        # Convert from qcow2 to raw
+        qemu-img convert -p -f qcow2 -O raw \
+          focal-server-cloudimg-amd64.img \
+          focal-server-cloudimg-amd64.raw
 
-## Next steps
+        # Download the Rust Hypervisor Firmware
+        wget https://github.com/cloud-hypervisor/rust-hypervisor-firmware/releases/download/0.4.2/hypervisor-fw
+        ```
 
-Now that you have your docs running, explore these key features:
+        Generate a cloud-init disk to set a default password (required on first boot):
 
-<CardGroup cols={2}>
+        ```bash
+        ./scripts/create-cloud-init.sh
+        ```
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+        Boot the VM:
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+        ```bash
+        ./cloud-hypervisor-static \
+          --firmware ./hypervisor-fw \
+          --disk path=focal-server-cloudimg-amd64.raw path=/tmp/ubuntu-cloudinit.img \
+          --cpus boot=4 \
+          --memory size=1024M \
+          --net "tap=,mac=,ip=,mask="
+        ```
+      </Tab>
+      <Tab title="AArch64">
+        ```bash
+        # Download Ubuntu Focal cloud image for AArch64
+        wget https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-arm64.img
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+        # Convert from qcow2 to raw
+        qemu-img convert -p -f qcow2 -O raw \
+          focal-server-cloudimg-arm64.img \
+          focal-server-cloudimg-arm64.raw
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+        # Download the Rust Hypervisor Firmware
+        wget https://github.com/cloud-hypervisor/rust-hypervisor-firmware/releases/download/0.4.2/hypervisor-fw
+        ```
 
-</CardGroup>
+        Generate a cloud-init disk to set a default password:
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+        ```bash
+        ./scripts/create-cloud-init.sh
+        ```
+
+        Boot the VM:
+
+        ```bash
+        ./cloud-hypervisor-static-aarch64 \
+          --firmware ./hypervisor-fw \
+          --disk path=focal-server-cloudimg-arm64.raw path=/tmp/ubuntu-cloudinit.img \
+          --cpus boot=4 \
+          --memory size=1024M \
+          --net "tap=,mac=,ip=,mask="
+        ```
+      </Tab>
+    </Tabs>
+
+    <Tip>
+      Ubuntu cloud images do not ship with a default password. The `create-cloud-init.sh` script seeds the image with username `cloud` and password `cloud123`. Only include the cloud-init disk on the **first boot** — you can omit it on subsequent boots once the image has been initialised.
+    </Tip>
+
+    If you need access to firmware messages or need to interact with GRUB, switch to the serial console:
+
+    ```bash
+    ./cloud-hypervisor-static \
+      --kernel ./hypervisor-fw \
+      --disk path=focal-server-cloudimg-amd64.raw path=/tmp/ubuntu-cloudinit.img \
+      --cpus boot=4 \
+      --memory size=1024M \
+      --net "tap=,mac=,ip=,mask=" \
+      --serial tty \
+      --console off
+    ```
+
+    Note: `hypervisor-fw` contains a Xen PVH boot entry and can be supplied via either `--firmware` or `--kernel`.
+  </Step>
+
+  <Step title="Boot with a direct kernel">
+    For more control, Cloud Hypervisor supports direct kernel boot. On `x86-64` a `vmlinux` ELF kernel (with PVH support) or a `bzImage` is accepted. On `AArch64` a standard `Image` binary is used.
+
+    Clone and apply the Cloud Hypervisor kernel configuration:
+
+    ```bash
+    git clone --depth 1 https://github.com/cloud-hypervisor/linux.git \
+      -b ch-6.12.8 linux-cloud-hypervisor
+    pushd linux-cloud-hypervisor
+    make ch_defconfig
+    ```
+
+    <Tabs>
+      <Tab title="x86-64">
+        Build the kernel:
+
+        ```bash
+        KCFLAGS="-Wa,-mx86-used-note=no" make bzImage -j $(nproc)
+        popd
+        ```
+
+        The kernel image is at `linux-cloud-hypervisor/arch/x86/boot/compressed/vmlinux.bin`.
+
+        Download and convert the disk image:
+
+        ```bash
+        wget https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img
+        qemu-img convert -p -f qcow2 -O raw \
+          focal-server-cloudimg-amd64.img \
+          focal-server-cloudimg-amd64.raw
+        ```
+
+        Boot the VM:
+
+        ```bash
+        sudo setcap cap_net_admin+ep ./cloud-hypervisor-static
+        ./scripts/create-cloud-init.sh
+
+        ./cloud-hypervisor-static \
+          --kernel ./linux-cloud-hypervisor/arch/x86/boot/compressed/vmlinux.bin \
+          --disk path=focal-server-cloudimg-amd64.raw path=/tmp/ubuntu-cloudinit.img \
+          --cmdline "console=hvc0 root=/dev/vda1 rw" \
+          --cpus boot=4 \
+          --memory size=1024M \
+          --net "tap=,mac=,ip=,mask="
+        ```
+
+        To capture early boot messages, use the serial console instead:
+
+        ```bash
+        ./cloud-hypervisor-static \
+          --kernel ./linux-cloud-hypervisor/arch/x86/boot/compressed/vmlinux.bin \
+          --console off \
+          --serial tty \
+          --disk path=focal-server-cloudimg-amd64.raw \
+          --cmdline "console=ttyS0 root=/dev/vda1 rw" \
+          --cpus boot=4 \
+          --memory size=1024M \
+          --net "tap=,mac=,ip=,mask="
+        ```
+      </Tab>
+      <Tab title="AArch64">
+        Build the kernel:
+
+        ```bash
+        make -j $(nproc)
+        popd
+        ```
+
+        The kernel image is at `linux-cloud-hypervisor/arch/arm64/boot/Image`.
+
+        Download and convert the disk image:
+
+        ```bash
+        wget https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-arm64.img
+        qemu-img convert -p -f qcow2 -O raw \
+          focal-server-cloudimg-arm64.img \
+          focal-server-cloudimg-arm64.raw
+        ```
+
+        Boot the VM:
+
+        ```bash
+        sudo setcap cap_net_admin+ep ./cloud-hypervisor-static-aarch64
+        ./scripts/create-cloud-init.sh
+
+        ./cloud-hypervisor-static-aarch64 \
+          --kernel ./linux-cloud-hypervisor/arch/arm64/boot/Image \
+          --disk path=focal-server-cloudimg-arm64.raw path=/tmp/ubuntu-cloudinit.img \
+          --cmdline "console=hvc0 root=/dev/vda1 rw" \
+          --cpus boot=4 \
+          --memory size=1024M \
+          --net "tap=,mac=,ip=,mask="
+        ```
+
+        To capture early boot messages, use the serial console instead:
+
+        ```bash
+        ./cloud-hypervisor-static-aarch64 \
+          --kernel ./linux-cloud-hypervisor/arch/arm64/boot/Image \
+          --console off \
+          --serial tty \
+          --disk path=focal-server-cloudimg-arm64.raw \
+          --cmdline "console=ttyAMA0 root=/dev/vda1 rw" \
+          --cpus boot=4 \
+          --memory size=1024M \
+          --net "tap=,mac=,ip=,mask="
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Enable the REST API">
+    Cloud Hypervisor exposes a REST API over a Unix domain socket for runtime management — adding devices, querying VM state, triggering live migration, and more.
+
+    Pass `--api-socket` when launching the VM:
+
+    ```bash
+    ./cloud-hypervisor-static \
+      --firmware ./hypervisor-fw \
+      --disk path=focal-server-cloudimg-amd64.raw \
+      --cpus boot=4 \
+      --memory size=1024M \
+      --net "tap=,mac=,ip=,mask=" \
+      --api-socket /tmp/cloud-hypervisor.sock
+    ```
+
+    With the socket open, you can interact with the running VM using `curl`:
+
+    ```bash
+    # Query VM info
+    curl --unix-socket /tmp/cloud-hypervisor.sock \
+      http://localhost/api/v1/vm.info
+
+    # Pause the VM
+    curl --unix-socket /tmp/cloud-hypervisor.sock \
+      -X PUT http://localhost/api/v1/vm.pause
+
+    # Resume the VM
+    curl --unix-socket /tmp/cloud-hypervisor.sock \
+      -X PUT http://localhost/api/v1/vm.resume
+    ```
+
+    <Tip>
+      The REST API also powers hotplug operations for CPUs, memory, and devices. See the [hotplug documentation](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/hotplug.md) for details.
+    </Tip>
+  </Step>
+</Steps>

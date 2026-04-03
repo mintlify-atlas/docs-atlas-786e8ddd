@@ -1,0 +1,88 @@
+---
+title: "What is Cloud Hypervisor?"
+description: "An open source Virtual Machine Monitor (VMM) built in Rust, designed for running modern cloud workloads with minimal footprint and strong security."
+---
+
+Cloud Hypervisor is an open source Virtual Machine Monitor (VMM) that runs on top of the [KVM](https://www.kernel.org/doc/Documentation/virtual/kvm/api.txt) hypervisor and the Microsoft Hypervisor (MSHV). It is implemented in [Rust](https://www.rust-lang.org/) and built on top of the [Rust VMM](https://github.com/rust-vmm) crates.
+
+The project focuses on running modern **Cloud Workloads** — workloads run by customers inside a Cloud Service Provider. This means modern operating systems with most I/O handled by paravirtualised devices (e.g. _virtio_), no requirement for legacy devices, and 64-bit CPUs only.
+
+<CardGroup cols={2}>
+  <Card title="Minimal Emulation" icon="minimize">
+    Avoids legacy device emulation. Only paravirtualised (virtio) devices are exposed to guests, reducing complexity and attack surface.
+  </Card>
+  <Card title="Low Latency & Footprint" icon="gauge-high">
+    Designed from the ground up for performance-sensitive cloud workloads with a small memory footprint and fast boot times.
+  </Card>
+  <Card title="Security Focused" icon="shield-halved">
+    Written in Rust for memory and thread safety. Minimal attack surface through reduced emulation and 64-bit only support.
+  </Card>
+  <Card title="Advanced Features" icon="sliders">
+    CPU, memory, and PCI hotplug support. Machine-to-machine live migration. REST API for runtime management.
+  </Card>
+</CardGroup>
+
+## Design Objectives
+
+Cloud Hypervisor is built around the following high-level objectives:
+
+- **Runs on KVM or MSHV** — supports both Linux KVM and the Microsoft Hypervisor
+- **Minimal emulation** — no legacy device model; virtio-based I/O only
+- **Low latency** — optimised for the responsiveness demands of cloud workloads
+- **Low memory footprint** — lean VMM process with no unnecessary overhead
+- **Low complexity** — a focused codebase that is easier to audit and maintain
+- **High performance** — takes advantage of modern hardware and OS features
+- **Small attack surface** — fewer emulated devices means fewer potential vulnerabilities
+- **64-bit support only** — no 32-bit guest or host support
+- **CPU, memory, PCI hotplug** — dynamic resource management at runtime
+- **Machine-to-machine migration** — live migration between hosts
+
+## Supported Architectures
+
+| Architecture | Status |
+|---|---|
+| `x86-64` | Full support |
+| `AArch64` | Full support |
+| `riscv64` | Experimental — limited functionality |
+
+AArch64 requires servers or development boards equipped with the **GICv3** interrupt controller. Functional differences between `x86-64` and `AArch64` are tracked in [GitHub issue #1125](https://github.com/cloud-hypervisor/cloud-hypervisor/issues/1125).
+
+The `riscv64` port is experimental. Refer to the [riscv documentation](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/docs/riscv.md) for details and current limitations.
+
+## Supported Guest Operating Systems
+
+Cloud Hypervisor supports the following guest operating systems:
+
+- **64-bit Linux** — any modern distribution; validated against Ubuntu Focal, Jammy, and Noble, as well as Fedora
+- **Windows 10 / Windows Server 2019** — supported on `x86-64`
+
+<Note>
+  Only 64-bit guest operating systems are supported. There is no plan to add 32-bit guest support.
+</Note>
+
+## Relationship with the Rust VMM Project
+
+Cloud Hypervisor is built on the [Rust VMM](https://github.com/rust-vmm) collection of reusable virtualization crates. Rather than implementing all VMM components from scratch, Cloud Hypervisor imports these shared crates and contributes improvements back upstream.
+
+This architecture is shared with other Rust VMMs such as Amazon's [Firecracker](https://firecracker-microvm.github.io/) and Google's [crosvm](https://chromium.googlesource.com/chromiumos/platform/crosvm/). A significant portion of Cloud Hypervisor's code originated in or is inspired by these projects.
+
+### Differences with Firecracker and crosvm
+
+While all three VMMs are written in Rust with a focus on safety and security, their goals differ:
+
+- **Firecracker** is optimised for serverless and container workloads with an emphasis on fast startup and strict resource isolation.
+- **crosvm** targets client-side virtualization within ChromeOS.
+- **Cloud Hypervisor** aims to be a **general-purpose VMM for cloud workloads** — not limited to any single use case — supporting richer hardware models, hotplug, live migration, and a wider range of guest operating systems.
+
+<Note>
+  **Contributing & Community**
+
+  Cloud Hypervisor welcomes contributions of all kinds: code, testing, documentation, bug reports, feature requests, and pull request reviews. The project follows the governance guidelines in the [Community](https://github.com/cloud-hypervisor/community) repository.
+
+  - **GitHub Issues:** [github.com/cloud-hypervisor/cloud-hypervisor/issues](https://github.com/cloud-hypervisor/cloud-hypervisor/issues)
+  - **Slack:** [cloud-hypervisor.slack.com](https://cloud-hypervisor.slack.com/)
+  - **Mailing list:** [lists.cloudhypervisor.org/g/dev](https://lists.cloudhypervisor.org/g/dev/)
+  - **Security issues:** Contact the maintainers listed in `MAINTAINERS.md`
+
+  See [CONTRIBUTING.md](https://github.com/cloud-hypervisor/cloud-hypervisor/blob/main/CONTRIBUTING.md) for full details.
+</Note>

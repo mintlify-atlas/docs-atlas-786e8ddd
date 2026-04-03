@@ -1,0 +1,346 @@
+---
+title: "ch-remote CLI"
+description: "Complete reference for ch-remote, the companion tool for managing running Cloud Hypervisor VMs."
+---
+
+`ch-remote` connects to a running `cloud-hypervisor` process via its API socket and sends management commands. It requires the `--api-socket` flag on every invocation.
+
+```bash
+ch-remote --api-socket <path> <COMMAND> [OPTIONS]
+```
+
+<Note>
+  Start `cloud-hypervisor` with `--api-socket path=/tmp/cloud-hypervisor.sock` to enable `ch-remote` connectivity.
+</Note>
+
+## VM lifecycle
+
+| Command | Description | VM State Required |
+|---|---|---|
+| `create` | Create a VM from a JSON config file | VMM running, no VM created |
+| `boot` | Boot a created VM | Created, not booted |
+| `shutdown` | Gracefully shut down the VM | Booted |
+| `delete` | Delete the VM (free resources) | Any |
+| `shutdown-vmm` | Shut down the VMM process entirely | Any |
+| `reboot` | Reboot the VM | Booted |
+| `pause` | Pause the VM | Booted |
+| `resume` | Resume a paused VM | Paused |
+| `power-button` | Trigger the virtual power button | Booted |
+| `nmi` | Inject a Non-Maskable Interrupt into the VM | Booted |
+| `ping` | Check if the VMM REST API is reachable | Any |
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock create vm-config.json
+ch-remote --api-socket /tmp/cloud-hypervisor.sock boot
+ch-remote --api-socket /tmp/cloud-hypervisor.sock pause
+ch-remote --api-socket /tmp/cloud-hypervisor.sock resume
+ch-remote --api-socket /tmp/cloud-hypervisor.sock reboot
+ch-remote --api-socket /tmp/cloud-hypervisor.sock shutdown
+ch-remote --api-socket /tmp/cloud-hypervisor.sock delete
+ch-remote --api-socket /tmp/cloud-hypervisor.sock shutdown-vmm
+ch-remote --api-socket /tmp/cloud-hypervisor.sock nmi
+ch-remote --api-socket /tmp/cloud-hypervisor.sock ping
+```
+
+## VM information
+
+### `info`
+
+Dump current VM configuration and state as JSON.
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock info
+```
+
+### `counters`
+
+Dump VM performance counters (virtio queue stats, etc.).
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock counters
+```
+
+## Resizing
+
+### `resize`
+
+Add or remove vCPUs and/or memory from a running VM.
+
+<ParamField path="--cpus" type="integer">
+  Desired total number of vCPUs. Must be between 1 and the `max` value set at boot.
+</ParamField>
+
+<ParamField path="--memory" type="size">
+  Desired total RAM (e.g. `2G`, `4096M`). Expanding takes effect immediately; shrinking takes effect after reboot.
+</ParamField>
+
+<ParamField path="--balloon" type="size">
+  Adjust balloon device size.
+</ParamField>
+
+```bash
+# Scale up to 8 vCPUs
+ch-remote --api-socket /tmp/cloud-hypervisor.sock resize --cpus 8
+
+# Expand memory to 3 GB
+ch-remote --api-socket /tmp/cloud-hypervisor.sock resize --memory 3G
+
+# Resize both at once
+ch-remote --api-socket /tmp/cloud-hypervisor.sock resize --cpus 8 --memory 4G
+```
+
+### `resize-zone`
+
+Resize a named memory zone.
+
+<ParamField path="--id" type="string" required>
+  ID of the memory zone to resize.
+</ParamField>
+
+<ParamField path="--size" type="size" required>
+  New size for the memory zone.
+</ParamField>
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock resize-zone --id mem0 --size 2G
+```
+
+### `resize-disk`
+
+Resize a disk attached to the VM.
+
+<ParamField path="--id" type="string" required>
+  ID of the disk device to resize.
+</ParamField>
+
+<ParamField path="--size" type="size" required>
+  New size for the disk.
+</ParamField>
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock resize-disk --id _disk0 --size 20G
+```
+
+## Hotplug: adding devices
+
+All `add-*` commands return a `PciDeviceInfo` JSON object with the PCI address and device ID assigned to the new device.
+
+### `add-device`
+
+Add a VFIO PCI device.
+
+<ParamField path="--path" type="sysfs path" required>
+  Sysfs path to the device (e.g. `/sys/bus/pci/devices/0000:01:00.0/`).
+</ParamField>
+
+<ParamField path="--id" type="string">
+  Optional device ID for later removal.
+</ParamField>
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock \
+  add-device path=/sys/bus/pci/devices/0000:01:00.0/
+```
+
+### `add-disk`
+
+Add a block device to a running VM.
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock add-disk path=/foo/bar/data.img
+```
+
+Accepts the same sub-parameters as `--disk` on the main CLI (path, readonly, direct, iommu, num_queues, queue_size, vhost_user, socket, id, pci_segment).
+
+### `add-fs`
+
+Add a virtio-fs filesystem device.
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock \
+  add-fs tag=myfs,socket=/tmp/virtiofsd.sock
+```
+
+### `add-net`
+
+Add a network device.
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock add-net tap=chtap0
+```
+
+### `add-pmem`
+
+Add a persistent memory (virtio-pmem) device.
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock add-pmem file=/foo/bar/nvdimm.img
+```
+
+### `add-vsock`
+
+Add a vsock device.
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock \
+  add-vsock cid=3,socket=/tmp/vsock.sock
+```
+
+### `add-vdpa`
+
+Add a vDPA device.
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock \
+  add-vdpa path=/dev/vhost-vdpa-0,num_queues=2
+```
+
+### `add-user-device`
+
+Add a userspace PCI device (vfio-user).
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock \
+  add-user-device socket=/tmp/vfio-user.sock
+```
+
+### `add-generic-vhost-user`
+
+Add a generic vhost-user device.
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock \
+  add-generic-vhost-user socket=/tmp/generic-vhost.sock,num_queues=2
+```
+
+## Hotplug: removing devices
+
+### `remove-device`
+
+Remove any hotplugged device by its ID. The device ID is either user-assigned at add time or returned in the `PciDeviceInfo` response.
+
+<ParamField path="--id" type="string" required>
+  The device ID to remove (e.g. `_disk0`, `_net1`).
+</ParamField>
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock remove-device --id _disk0
+ch-remote --api-socket /tmp/cloud-hypervisor.sock remove-device --id _net1
+```
+
+## Snapshot & restore
+
+### `snapshot`
+
+Take a snapshot of a paused VM. The VM must be paused first with `pause`.
+
+```bash
+# Pause the VM first
+ch-remote --api-socket /tmp/cloud-hypervisor.sock pause
+
+# Take snapshot to a directory
+ch-remote --api-socket /tmp/cloud-hypervisor.sock snapshot file:///home/user/vm-snapshot
+```
+
+The snapshot directory will contain:
+- `config.json` — VM configuration
+- `memory-ranges` — Guest memory dump
+- `state.json` — Device and vCPU state
+
+### `restore`
+
+Restore a VM from a snapshot. Use on a freshly started `cloud-hypervisor` instance (no VM configured yet).
+
+<ParamField path="--source-url" type="url">
+  URL to the snapshot directory. Use `file:///path/to/snapshot`.
+</ParamField>
+
+<ParamField path="--prefault" type="on|off">
+  Pre-fault all memory pages on restore. Default: `off`.
+</ParamField>
+
+```bash
+# Start a new VMM instance
+./cloud-hypervisor --api-socket /tmp/ch-restore.sock
+
+# Restore the snapshot
+ch-remote --api-socket /tmp/ch-restore.sock \
+  restore --source-url file:///home/user/vm-snapshot
+
+# Resume the restored VM
+ch-remote --api-socket /tmp/ch-restore.sock resume
+```
+
+<Warning>
+  Snapshot/restore is not compatible across different Cloud Hypervisor versions.
+</Warning>
+
+## Live migration
+
+### `receive-migration`
+
+Prepare a destination VMM to receive a migrating VM.
+
+```bash
+# On destination host — start empty VMM
+./cloud-hypervisor --api-socket /tmp/dst.sock
+
+# Prepare to receive
+ch-remote --api-socket /tmp/dst.sock \
+  receive-migration unix:/tmp/migration.sock
+```
+
+### `send-migration`
+
+Send a running VM to a destination.
+
+<ParamField path="destination_url" type="url" required>
+  Target URL. Use `unix:/path` for local UNIX socket or `tcp://host:port` for remote.
+</ParamField>
+
+<ParamField path="local" type="on|off">
+  Set `local=true` for same-host migration (UNIX socket). Default: `false`.
+</ParamField>
+
+```bash
+# Local (same host) migration
+ch-remote --api-socket /tmp/src.sock \
+  send-migration destination_url=unix:/tmp/migration.sock,local=true
+
+# Remote (TCP) migration
+ch-remote --api-socket /tmp/src.sock \
+  send-migration destination_url=tcp://192.168.1.100:6666
+```
+
+<Warning>
+  Live migration requires the VM to be started with `--memory shared=on` or hugepages enabled.
+</Warning>
+
+## Debug
+
+### `coredump`
+
+Generate a guest memory coredump for analysis. The VM must be paused first.
+
+<Note>
+  Only available on x86-64 hosts compiled with the `guest_debug` feature flag.
+</Note>
+
+<ParamField path="--destination-url" type="url" required>
+  Path to write the coredump file, e.g. `file:///tmp/vm.coredump`.
+</ParamField>
+
+```bash
+ch-remote --api-socket /tmp/cloud-hypervisor.sock pause
+ch-remote --api-socket /tmp/cloud-hypervisor.sock coredump --destination-url file:///tmp/vm.coredump
+```
+
+## D-Bus API
+
+`ch-remote` can also connect via D-Bus instead of a UNIX socket when Cloud Hypervisor is started with the `dbus_api` feature. Pass `--dbus-service-name` and `--dbus-object-path` instead of `--api-socket`:
+
+```bash
+ch-remote --dbus-service-name "org.cloudhypervisor.DBusApi" \
+          --dbus-object-path "/org/cloudhypervisor/DBusApi" \
+          info
+```

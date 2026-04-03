@@ -1,0 +1,250 @@
+---
+title: "CPU Configuration"
+description: "Configure virtual CPUs for Cloud Hypervisor VMs, including boot count, topology, hotplug, affinity, and CPU features."
+---
+
+Cloud Hypervisor exposes virtual CPU configuration through the `--cpus` flag. This controls the number of vCPUs, their topology, hotplug capacity, host CPU affinity, and optional CPU feature extensions.
+
+## CpusConfig struct
+
+```rust
+struct CpusConfig {
+    boot_vcpus: u32,
+    max_vcpus: u32,
+    topology: Option<CpuTopology>,
+    kvm_hyperv: bool,
+    max_phys_bits: u8,
+    affinity: Option<Vec<CpuAffinity>>,
+    features: CpuFeatures,
+    nested: bool,
+    core_scheduling: CoreScheduling,
+}
+```
+
+## CLI syntax
+
+```bash
+--cpus boot=<boot_vcpus>,max=<max_vcpus>,topology=<threads_per_core>:<cores_per_die>:<dies_per_package>:<packages>,kvm_hyperv=on|off,max_phys_bits=<maximum_number_of_physical_bits>,affinity=<list_of_vcpus_with_their_associated_cpuset>,features=<list_of_features_to_enable>,nested=on|off,core_scheduling=vm|vcpu|off
+```
+
+## Parameters
+
+<ParamField path="boot" type="u32" required>
+  Number of vCPUs present at boot time. This option is mandatory when using `--cpus`. If `--cpus` is not specified, the default value is `1`.
+</ParamField>
+
+<ParamField path="max" type="u32" default="value of boot">
+  Maximum number of vCPUs that can be assigned to the VM. Used together with CPU hotplug — setting `max` greater than `boot` allows adding vCPUs at runtime without restarting the VM. The value must be greater than or equal to `boot`.
+</ParamField>
+
+<ParamField path="topology" type="string" default="1:1:1:1">
+  Topology of the guest platform in the format `threads_per_core:cores_per_die:dies_per_package:packages`. Exposing the correct topology to the guest allows for better resource utilization and can improve performance by matching host NUMA/SMT layout.
+</ParamField>
+
+<ParamField path="kvm_hyperv" type="bool" default="off">
+  Enable KVM Hyper-V emulation. When turned on, KVM emulates the synthetic interrupt controller (SynIC) and synthetic timers expected by Windows guests. Required for running Windows 10 / Windows Server workloads reliably.
+</ParamField>
+
+<ParamField path="max_phys_bits" type="u8">
+  Maximum number of physical bits for all vCPUs. Sets a limit for the size of the guest's addressable space. Primarily useful for debugging purposes.
+</ParamField>
+
+<ParamField path="affinity" type="string">
+  Host CPU set associated with each vCPU. Used for CPU pinning, NUMA-aware placement, or isolating VM workloads from each other on a shared host. Each vCPU is mapped to a list of host CPUs it is allowed to run on.
+
+  Syntax: `affinity=[<vcpu_id>@[<host_cpu_list>], ...]`
+
+  If not specified, each vCPU can run on any host CPU.
+</ParamField>
+
+<ParamField path="features" type="string">
+  Comma-separated list of CPU features to enable. Currently available: `amx` (x86 Advanced Matrix Extensions for hardware-accelerated matrix operations).
+</ParamField>
+
+<ParamField path="nested" type="bool" default="on">
+  Enable nested virtualization. Required for the guest to access hardware virtualization instructions. This option can only be changed on x86-64.
+</ParamField>
+
+<ParamField path="core_scheduling" type="string" default="vm">
+  Controls Linux core scheduling (`PR_SCHED_CORE`) for vCPU threads to mitigate side-channel attacks (MDS, L1TF) between vCPU threads.
+
+  - `vm`: All vCPU threads share a single scheduling cookie. vCPUs may be co-scheduled on SMT siblings of the same core, providing better performance while isolating from host tasks.
+  - `vcpu`: Each vCPU gets its own unique cookie. No two vCPUs share SMT siblings — strongest isolation, at some performance cost.
+  - `off`: No core scheduling is applied.
+
+  On kernels older than 5.14, this option has no effect.
+</ParamField>
+
+---
+
+## CPU topology
+
+The `CpuTopology` struct controls how CPUs appear to the guest OS:
+
+```rust
+struct CpuTopology {
+    threads_per_core: u16,
+    cores_per_die: u16,
+    dies_per_package: u16,
+    packages: u16,
+}
+```
+
+The topology values must multiply to equal or exceed `boot`. For example, `topology=2:4:1:2` describes 2 threads per core, 4 cores per die, 1 die per package, 2 packages — a total of 16 logical CPUs.
+
+<Note>
+The topology description is advisory — it tells the guest how to interpret the vCPUs. It does not validate that the product equals `boot` at runtime, but mismatches can cause guest OS confusion.
+</Note>
+
+### Example: dual-socket server layout
+
+```bash
+# 2 packages × 1 die × 4 cores × 2 threads = 16 vCPUs
+./cloud-hypervisor \
+  --cpus boot=16,topology=2:4:1:2 \
+  --memory size=8G \
+  --kernel ./vmlinux
+```
+
+---
+
+## CPU hotplug
+
+CPU hotplug lets you add or remove vCPUs from a running VM without a restart. To enable it, set `max` larger than `boot`.
+
+<Steps>
+  <Step title="Start the VM with hotplug capacity">
+    ```bash
+    ./cloud-hypervisor \
+      --kernel custom-vmlinux.bin \
+      --cmdline "console=ttyS0 console=hvc0 root=/dev/vda1 rw" \
+      --disk path=focal-server-cloudimg-amd64.raw \
+      --cpus boot=4,max=8 \
+      --memory size=1024M \
+      --net "tap=,mac=,ip=,mask=" \
+      --api-socket=/tmp/ch-socket
+    ```
+  </Step>
+  <Step title="Add vCPUs via the resize API">
+    ```bash
+    ./ch-remote --api-socket=/tmp/ch-socket resize --cpus 8
+    ```
+  </Step>
+  <Step title="Online the new CPUs inside the guest">
+    ```bash
+    echo 1 | tee /sys/devices/system/cpu/cpu[4,5,6,7]/online
+    ```
+    Verify:
+    ```bash
+    lscpu | grep list:
+    # On-line CPU(s) list:  0-7
+    ```
+  </Step>
+</Steps>
+
+To reduce vCPUs, send a smaller count to the resize API. The CPUs will be automatically offlined inside the guest:
+
+```bash
+./ch-remote --api-socket=/tmp/ch-socket resize --cpus 2
+```
+
+<Note>
+Kernel 5.5 or later with ACPI GED support is required for CPU hotplug. Enable `CONFIG_ACPI_REDUCED_HARDWARE_ONLY` or apply the upstream ACPI GED patch.
+</Note>
+
+---
+
+## CPU affinity
+
+CPU affinity pins vCPUs to specific host CPUs. This is useful for:
+
+- Preventing cross-VM interference on shared hosts
+- Ensuring a VM runs on a specific NUMA node
+- Avoiding noisy-neighbour effects for latency-sensitive workloads
+
+```rust
+struct CpuAffinity {
+    vcpu: u32,
+    host_cpus: Vec<usize>,
+}
+```
+
+### Affinity syntax
+
+```
+affinity=[<vcpu_id>@[<host_cpu_list>], ...]
+```
+
+Use `-` for ranges, `,` for individual CPUs, or combine both:
+
+```bash
+# vCPU 0 → host CPUs 2 and 3; vCPU 1 → host CPUs 0 and 1; vCPU 2 → any
+--cpus boot=3,affinity=[0@[2,3],1@[0,1]]
+
+# vCPU 0 → host CPUs 0–4
+--cpus boot=1,affinity=[0@[0-4]]
+
+# vCPU 0 → host CPUs 0–99 plus CPU 255
+--cpus boot=1,affinity=[0@[0-99,255]]
+```
+
+<Tip>
+vCPUs not listed in `affinity` can still run on any host CPU. You only need to specify the vCPUs you want to constrain.
+</Tip>
+
+---
+
+## Examples
+
+<CodeGroup>
+
+```bash Single vCPU (default)
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=512M
+# Equivalent to --cpus boot=1
+```
+
+```bash Four vCPUs with SMT topology
+./cloud-hypervisor \
+  --cpus boot=4,topology=2:2:1:1 \
+  --memory size=2G \
+  --kernel ./vmlinux \
+  --disk path=focal.raw
+```
+
+```bash Windows guest with Hyper-V emulation
+./cloud-hypervisor \
+  --cpus boot=4,kvm_hyperv=on \
+  --memory size=4G \
+  --kernel ./hypervisor-fw \
+  --disk path=windows.raw
+```
+
+```bash Hotplug-ready VM
+./cloud-hypervisor \
+  --cpus boot=4,max=16 \
+  --memory size=4G \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --api-socket=/tmp/ch-socket
+```
+
+```bash Pinned vCPUs with affinity
+./cloud-hypervisor \
+  --cpus boot=4,affinity=[0@[0,1],1@[2,3],2@[4,5],3@[6,7]] \
+  --memory size=4G \
+  --kernel ./vmlinux \
+  --disk path=focal.raw
+```
+
+```bash AMX feature enabled
+./cloud-hypervisor \
+  --cpus boot=4,features=amx \
+  --memory size=4G \
+  --kernel ./vmlinux \
+  --disk path=focal.raw
+```
+
+</CodeGroup>

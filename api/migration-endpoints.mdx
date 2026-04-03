@@ -1,0 +1,196 @@
+---
+title: "Snapshot, Restore & Migration Endpoints"
+description: "API reference for snapshotting, restoring, and live-migrating Cloud Hypervisor VMs."
+---
+
+## VM Snapshot
+
+Save the full state of a paused VM to a directory on disk. The snapshot can later be used to restore the VM to this exact point in time.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.snapshot` |
+| **Prerequisites** | VM is paused |
+| **Response** | `204 No Content`; `404` if not created; `405` if not paused |
+
+<ParamField path="destination_url" type="string">
+  File URL pointing to the directory where the snapshot will be written, e.g. `"file:///snapshots/my-vm"`. The directory must be accessible by the Cloud Hypervisor process.
+</ParamField>
+
+```bash
+# First, pause the VM
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.pause'
+
+# Then take the snapshot
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.snapshot' \
+     -H 'Content-Type: application/json' \
+     -d '{"destination_url": "file:///snapshots/my-vm"}'
+```
+
+<Warning>
+Snapshot and restore compatibility is not guaranteed across Cloud Hypervisor versions. Only restore a snapshot using the same version that created it, or a version that explicitly documents snapshot compatibility.
+</Warning>
+
+---
+
+## VM Restore
+
+Restore a VM from a previously taken snapshot. The VM must be created (via `vm.create`) before it can be restored, but must not yet be booted.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.restore` |
+| **Prerequisites** | VM is created but not booted |
+| **Response** | `204 No Content`; `404` if the VM is already created and booted |
+
+<ParamField path="source_url" type="string" required>
+  File URL pointing to the snapshot directory to restore from, e.g. `"file:///snapshots/my-vm"`.
+</ParamField>
+
+<ParamField path="prefault" type="boolean">
+  Pre-fault all memory pages during restore (reads all pages into host memory eagerly). Can reduce latency spikes after restore. Default: `false`.
+</ParamField>
+
+<ParamField path="memory_restore_mode" type="string">
+  Memory restoration strategy. `"Copy"` (default) copies memory from the snapshot on restore. `"OnDemand"` maps memory pages lazily as the guest accesses them.
+</ParamField>
+
+<ParamField path="resume" type="boolean">
+  If `true`, automatically resume the VM after restoring it (equivalent to calling `vm.resume` immediately after restore).
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.restore' \
+     -H 'Content-Type: application/json' \
+     -d '{"source_url": "file:///snapshots/my-vm", "prefault": false}'
+```
+
+<Note>
+The `vm.restore` endpoint restores the VM into the paused state by default. Call `vm.resume` afterward (or set `resume: true` in the request) to start running the restored VM.
+</Note>
+
+---
+
+## Receive Migration
+
+Prepare a Cloud Hypervisor instance to receive a live migration from another host. This sets up the receiver endpoint and begins listening for the incoming migration data.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.receive-migration` |
+| **Prerequisites** | None (VMM must be running; no VM needs to be created in advance) |
+| **Response** | `204 No Content`; `500` on failure |
+
+<ParamField path="receiver_url" type="string" required>
+  URL on which this instance will listen for the incoming migration. For TCP migrations, use a form like `"tcp://0.0.0.0:9100"`. For local (same-host) migrations, a UNIX socket URL can be used.
+</ParamField>
+
+```bash
+# On the destination host: prepare to receive
+curl --unix-socket /tmp/cloud-hypervisor-dst.sock \
+     -X PUT 'http://localhost/api/v1/vm.receive-migration' \
+     -H 'Content-Type: application/json' \
+     -d '{"receiver_url": "tcp://0.0.0.0:9100"}'
+```
+
+---
+
+## Send Migration
+
+Initiate a live migration of a running VM to a destination Cloud Hypervisor instance. The destination must already be listening via `vm.receive-migration`.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.send-migration` |
+| **Prerequisites** | VM is booted; VM memory must be backed by shared memory (`memory.shared: true`) or hugepages |
+| **Response** | `204 No Content`; `500` on failure |
+
+<Warning>
+Live migration requires that the VM was created with either `memory.shared: true` or `memory.hugepages: true`. Migrations will fail if the VM is using regular anonymous memory.
+</Warning>
+
+<ParamField path="destination_url" type="string" required>
+  URL of the destination receiver, e.g. `"tcp://192.168.1.2:9100"`. Must match the `receiver_url` configured on the destination.
+</ParamField>
+
+<ParamField path="local" type="boolean">
+  Set to `true` for local (same-host) migrations. When `true`, memory is not copied over the network — only state is transferred. Default: `false`.
+</ParamField>
+
+<ParamField path="downtime_ms" type="integer">
+  Target maximum VM downtime during the final switchover, in milliseconds. The migration engine will iterate pre-copying dirty pages until this threshold is met or the timeout is reached. Default: `300`.
+</ParamField>
+
+<ParamField path="timeout_s" type="integer">
+  Overall migration timeout in seconds. If migration does not complete within this duration, the configured `timeout_strategy` is applied. Minimum: 1. Default: `3600` (one hour).
+</ParamField>
+
+<ParamField path="timeout_strategy" type="string">
+  Action to take when `timeout_s` is reached. `"Cancel"` (default) aborts the migration and keeps the VM running on the source. `"Ignore"` proceeds with the final switchover regardless of downtime.
+</ParamField>
+
+<ParamField path="connections" type="integer">
+  Number of parallel TCP connections to use for transferring migration data. Must be between 1 and 128. Default: `1`. Multiple connections are not supported when using UNIX socket migration (local migration).
+</ParamField>
+
+```bash
+# On the source host: send the migration
+curl --unix-socket /tmp/cloud-hypervisor-src.sock \
+     -X PUT 'http://localhost/api/v1/vm.send-migration' \
+     -H 'Content-Type: application/json' \
+     -d '{
+         "destination_url": "tcp://192.168.1.2:9100",
+         "downtime_ms": 100,
+         "timeout_s": 300,
+         "connections": 4
+     }'
+```
+
+**Complete live migration example:**
+
+```bash
+# --- Destination host ---
+# Start Cloud Hypervisor (no VM config needed; state comes from the source)
+./cloud-hypervisor --api-socket path=/tmp/clh-dst.sock
+
+# Prepare to receive the migration
+curl --unix-socket /tmp/clh-dst.sock \
+     -X PUT 'http://localhost/api/v1/vm.receive-migration' \
+     -H 'Content-Type: application/json' \
+     -d '{"receiver_url": "tcp://0.0.0.0:9100"}'
+
+# --- Source host (VM already running with shared memory) ---
+curl --unix-socket /tmp/clh-src.sock \
+     -X PUT 'http://localhost/api/v1/vm.send-migration' \
+     -H 'Content-Type: application/json' \
+     -d '{"destination_url": "tcp://192.168.1.100:9100"}'
+```
+
+---
+
+## Inject NMI
+
+Inject a Non-Maskable Interrupt (NMI) into the running VM. An NMI is a hardware interrupt that cannot be masked by the guest and is typically used to trigger crash dumps or emergency diagnostics from the host.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.nmi` |
+| **Prerequisites** | VM is booted |
+| **Response** | `204 No Content` |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.nmi'
+```
+
+<Note>
+The HTTP handler registers this endpoint as `/vm.nmi`. The OpenAPI spec has a typo listing it as `/vmm.nmi`, but the correct path to use is `/api/v1/vm.nmi`.
+</Note>

@@ -1,0 +1,517 @@
+---
+title: "VM Lifecycle Endpoints"
+description: "API reference for creating, booting, inspecting, and controlling a Cloud Hypervisor virtual machine."
+---
+
+All endpoints communicate over a UNIX socket. Start Cloud Hypervisor with `--api-socket path=/tmp/cloud-hypervisor.sock` before issuing any of the requests below.
+
+## VMM Ping
+
+Check whether the API server is available and retrieve VMM version information.
+
+| | |
+| --- | --- |
+| **Method** | `GET` |
+| **Path** | `/api/v1/vmm.ping` |
+| **Prerequisites** | None |
+| **Response** | `200 OK` with `VmmPingResponse` body |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X GET 'http://localhost/api/v1/vmm.ping' \
+     -H 'Accept: application/json'
+```
+
+**Response fields:**
+
+<ResponseField name="version" type="string" required>
+  The Cloud Hypervisor version string (e.g. `"v40.0.0"`).
+</ResponseField>
+
+<ResponseField name="build_version" type="string">
+  Full build version including commit hash.
+</ResponseField>
+
+<ResponseField name="pid" type="integer">
+  Process ID of the running Cloud Hypervisor VMM.
+</ResponseField>
+
+<ResponseField name="features" type="array of strings">
+  List of compiled-in feature flags active in this build.
+</ResponseField>
+
+---
+
+## VMM Shutdown
+
+Shut down the VMM process entirely.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vmm.shutdown` |
+| **Prerequisites** | VMM is running |
+| **Response** | `204 No Content` |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vmm.shutdown'
+```
+
+---
+
+## Create VM
+
+Create a VM instance from a configuration object. The VM is created but not booted.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.create` |
+| **Prerequisites** | No VM has been created yet |
+| **Response** | `204 No Content` |
+
+<ParamField path="payload" type="object" required>
+  Boot payload for the guest.
+  <Expandable title="PayloadConfig properties">
+    <ParamField path="kernel" type="string">
+      Path to the guest kernel image (e.g. a `vmlinux` ELF binary).
+    </ParamField>
+    <ParamField path="cmdline" type="string">
+      Kernel command line parameters.
+    </ParamField>
+    <ParamField path="initramfs" type="string">
+      Path to an optional initramfs image.
+    </ParamField>
+    <ParamField path="firmware" type="string">
+      Path to firmware image (e.g. OVMF for UEFI boot). Mutually exclusive with `kernel`.
+    </ParamField>
+    <ParamField path="igvm" type="string">
+      Path to an IGVM file (used for confidential VMs).
+    </ParamField>
+    <ParamField path="host_data" type="string">
+      Host-provided data passed to the guest (used with confidential computing).
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="cpus" type="object">
+  CPU configuration for the VM.
+  <Expandable title="CpusConfig properties">
+    <ParamField path="boot_vcpus" type="integer" required>
+      Number of vCPUs available at boot. Minimum: 1.
+    </ParamField>
+    <ParamField path="max_vcpus" type="integer" required>
+      Maximum number of vCPUs (hot-pluggable up to this limit). Minimum: 1.
+    </ParamField>
+    <ParamField path="topology" type="object">
+      CPU topology: `threads_per_core`, `cores_per_die`, `dies_per_package`, `packages`.
+    </ParamField>
+    <ParamField path="kvm_hyperv" type="boolean">
+      Enable KVM Hyper-V emulation. Default: `false`.
+    </ParamField>
+    <ParamField path="max_phys_bits" type="integer">
+      Maximum number of physical address bits exposed to the guest.
+    </ParamField>
+    <ParamField path="nested" type="boolean">
+      Enable nested virtualisation. Default: `true`.
+    </ParamField>
+    <ParamField path="affinity" type="array">
+      Per-vCPU host CPU affinity list (`vcpu`, `host_cpus`).
+    </ParamField>
+    <ParamField path="features" type="object">
+      CPU feature flags. Currently supports `amx` (boolean).
+    </ParamField>
+    <ParamField path="core_scheduling" type="string">
+      Core scheduling granularity: `"Vm"`, `"Vcpu"`, or `"Off"`. Default: `"Vm"`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="memory" type="object">
+  Memory configuration for the VM.
+  <Expandable title="MemoryConfig properties">
+    <ParamField path="size" type="integer" required>
+      Base memory size in bytes.
+    </ParamField>
+    <ParamField path="hotplug_size" type="integer">
+      Maximum memory that can be hot-plugged, in bytes.
+    </ParamField>
+    <ParamField path="hotplugged_size" type="integer">
+      Memory already hot-plugged at boot, in bytes.
+    </ParamField>
+    <ParamField path="mergeable" type="boolean">
+      Enable kernel same-page merging (KSM). Default: `false`.
+    </ParamField>
+    <ParamField path="hotplug_method" type="string">
+      Hot-plug method: `"Acpi"` or `"VirtioMem"`. Default: `"Acpi"`.
+    </ParamField>
+    <ParamField path="shared" type="boolean">
+      Back memory with a `memfd` shared mapping. Required for live migration. Default: `false`.
+    </ParamField>
+    <ParamField path="hugepages" type="boolean">
+      Use huge pages for guest memory. Default: `false`.
+    </ParamField>
+    <ParamField path="hugepage_size" type="integer">
+      Huge page size in bytes (e.g. `2097152` for 2 MB).
+    </ParamField>
+    <ParamField path="prefault" type="boolean">
+      Pre-fault all memory pages at VM start. Default: `false`.
+    </ParamField>
+    <ParamField path="thp" type="boolean">
+      Enable transparent huge pages. Default: `true`.
+    </ParamField>
+    <ParamField path="zones" type="array">
+      List of named memory zones (`MemoryZoneConfig`), each with its own `id`, `size`, NUMA binding, and hotplug settings.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="disks" type="array">
+  List of disk devices. See the [Hotplug Endpoints](/api/hotplug-endpoints) page for the full `DiskConfig` schema.
+</ParamField>
+
+<ParamField path="net" type="array">
+  List of network interfaces. See the [Hotplug Endpoints](/api/hotplug-endpoints) page for the full `NetConfig` schema.
+</ParamField>
+
+<ParamField path="rng" type="object">
+  Virtio RNG (random number generator) configuration.
+  <Expandable title="RngConfig properties">
+    <ParamField path="src" type="string" required>
+      Path to entropy source, e.g. `"/dev/urandom"`.
+    </ParamField>
+    <ParamField path="iommu" type="boolean">
+      Place the RNG device behind a virtual IOMMU. Default: `false`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="balloon" type="object">
+  Virtio memory balloon configuration.
+  <Expandable title="BalloonConfig properties">
+    <ParamField path="size" type="integer" required>
+      Initial balloon size in bytes.
+    </ParamField>
+    <ParamField path="deflate_on_oom" type="boolean">
+      Automatically deflate the balloon when the guest is under memory pressure. Default: `false`.
+    </ParamField>
+    <ParamField path="free_page_reporting" type="boolean">
+      Enable guest to report free pages back to the host. Default: `false`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="fs" type="array">
+  List of virtio-fs devices. See [Hotplug Endpoints](/api/hotplug-endpoints) for `FsConfig` schema.
+</ParamField>
+
+<ParamField path="pmem" type="array">
+  List of persistent memory devices. See [Hotplug Endpoints](/api/hotplug-endpoints) for `PmemConfig` schema.
+</ParamField>
+
+<ParamField path="serial" type="object">
+  Serial console configuration (`ConsoleConfig`): `mode` (`"Off"`, `"Pty"`, `"Tty"`, `"File"`, `"Socket"`, `"Null"`), optional `file` path or `socket` path, and `iommu`.
+</ParamField>
+
+<ParamField path="console" type="object">
+  VirtIO console configuration. Same fields as `serial`.
+</ParamField>
+
+<ParamField path="debug_console" type="object">
+  Debug console configuration: `mode`, optional `file`, and `iobase` (I/O port base address).
+</ParamField>
+
+<ParamField path="devices" type="array">
+  List of VFIO/PCI passthrough devices. See [Hotplug Endpoints](/api/hotplug-endpoints) for `DeviceConfig` schema.
+</ParamField>
+
+<ParamField path="vdpa" type="array">
+  List of vDPA devices. See [Hotplug Endpoints](/api/hotplug-endpoints) for `VdpaConfig` schema.
+</ParamField>
+
+<ParamField path="vsock" type="object">
+  A single vsock device. See [Hotplug Endpoints](/api/hotplug-endpoints) for `VsockConfig` schema.
+</ParamField>
+
+<ParamField path="iommu" type="boolean">
+  Enable a virtual IOMMU for the VM. Default: `false`.
+</ParamField>
+
+<ParamField path="watchdog" type="boolean">
+  Enable a virtual watchdog device. Default: `false`.
+</ParamField>
+
+<ParamField path="pvpanic" type="boolean">
+  Enable the PVPanic device (signals guest kernel panics to the host). Default: `false`.
+</ParamField>
+
+<ParamField path="numa" type="array">
+  NUMA topology configuration. Each entry specifies a `guest_numa_id` and optional `cpus`, `distances`, `memory_zones`, `pci_segments`, and `device_id`.
+</ParamField>
+
+<ParamField path="pci_segments" type="array">
+  PCI segment configuration. Each entry requires a `pci_segment` ID and optional MMIO aperture weights.
+</ParamField>
+
+<ParamField path="platform" type="object">
+  Platform-level configuration: number of PCI segments, IOMMU segments, serial number, UUID, OEM strings, and flags for TDX or SEV-SNP.
+</ParamField>
+
+<ParamField path="tpm" type="object">
+  TPM device configuration. Requires a `socket` path to a TPM emulator.
+</ParamField>
+
+<ParamField path="landlock_enable" type="boolean">
+  Enable Landlock sandboxing for the VMM process. Default: `false`.
+</ParamField>
+
+<ParamField path="landlock_rules" type="array">
+  List of Landlock access rules. Each rule specifies a `path` and `access` string.
+</ParamField>
+
+<ParamField path="rate_limit_groups" type="array">
+  Named rate-limit groups that can be shared across disk devices. Each entry requires an `id` and a `rate_limiter_config` (with optional `bandwidth` and `ops` token buckets).
+</ParamField>
+
+**Example — create a VM with 4 vCPUs, 1 GB RAM, one disk, and one network interface:**
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock -i \
+     -X PUT 'http://localhost/api/v1/vm.create' \
+     -H 'Accept: application/json' \
+     -H 'Content-Type: application/json' \
+     -d '{
+         "cpus": {"boot_vcpus": 4, "max_vcpus": 4},
+         "payload": {
+             "kernel": "/opt/clh/kernel/vmlinux-virtio-fs-virtio-iommu",
+             "cmdline": "console=ttyS0 console=hvc0 root=/dev/vda1 rw"
+         },
+         "disks": [{"path": "/opt/clh/images/focal-server-cloudimg-amd64.raw"}],
+         "rng": {"src": "/dev/urandom"},
+         "net": [{"ip": "192.168.10.10", "mask": "255.255.255.0", "mac": "12:34:56:78:90:01"}]
+     }'
+```
+
+---
+
+## Boot VM
+
+Boot a previously created VM instance.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.boot` |
+| **Prerequisites** | VM is created but not yet booted |
+| **Response** | `204 No Content` on success; `404` if VM not created |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.boot'
+```
+
+---
+
+## Get VM Info
+
+Return the current configuration and state of the VM.
+
+| | |
+| --- | --- |
+| **Method** | `GET` |
+| **Path** | `/api/v1/vm.info` |
+| **Prerequisites** | VM is created |
+| **Response** | `200 OK` with `VmInfo` body |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X GET 'http://localhost/api/v1/vm.info' \
+     -H 'Accept: application/json'
+```
+
+**Response fields:**
+
+<ResponseField name="config" type="object" required>
+  The full `VmConfig` object used to create the VM.
+</ResponseField>
+
+<ResponseField name="state" type="string" required>
+  Current VM state. One of: `"Created"`, `"Running"`, `"Shutdown"`, `"Paused"`.
+</ResponseField>
+
+<ResponseField name="memory_actual_size" type="integer">
+  Actual memory size currently allocated to the VM, in bytes.
+</ResponseField>
+
+<ResponseField name="device_tree" type="object">
+  Map of device IDs to `DeviceNode` entries, each containing `id`, `resources`, `children`, and `pci_bdf`.
+</ResponseField>
+
+---
+
+## Shutdown VM
+
+Gracefully shut down the running VM. The VM instance remains created (not deleted).
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.shutdown` |
+| **Prerequisites** | VM is booted |
+| **Response** | `204 No Content`; `404` if not created; `405` if not started |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.shutdown'
+```
+
+---
+
+## Reboot VM
+
+Reboot the running VM.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.reboot` |
+| **Prerequisites** | VM is booted |
+| **Response** | `204 No Content`; `404` if not created; `405` if not booted |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.reboot'
+```
+
+---
+
+## Delete VM
+
+Delete the VM instance. This releases all resources associated with the VM.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.delete` |
+| **Prerequisites** | None (works in any state) |
+| **Response** | `204 No Content` |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.delete'
+```
+
+---
+
+## Pause VM
+
+Pause execution of a running VM. The VM state is preserved in memory.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.pause` |
+| **Prerequisites** | VM is booted |
+| **Response** | `204 No Content`; `404` if not created; `405` if not booted |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.pause'
+```
+
+---
+
+## Resume VM
+
+Resume a paused VM.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.resume` |
+| **Prerequisites** | VM is paused |
+| **Response** | `204 No Content`; `404` if not booted; `405` if not paused |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.resume'
+```
+
+---
+
+## Power Button
+
+Trigger a virtual power button event in the VM. This signals the guest OS to perform a graceful shutdown, similar to pressing the physical power button on a machine.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.power-button` |
+| **Prerequisites** | VM is booted |
+| **Response** | `204 No Content`; `404` if not created; `405` if not booted |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.power-button'
+```
+
+---
+
+## Get VM Counters
+
+Retrieve device-level I/O counters from the running VM.
+
+| | |
+| --- | --- |
+| **Method** | `GET` |
+| **Path** | `/api/v1/vm.counters` |
+| **Prerequisites** | VM is booted |
+| **Response** | `200 OK` with `VmCounters` body |
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X GET 'http://localhost/api/v1/vm.counters' \
+     -H 'Accept: application/json'
+```
+
+The response is a JSON object mapping device names to counter maps:
+
+```json
+{
+  "virtio-disk0": {
+    "read_bytes": 1048576,
+    "write_bytes": 524288,
+    "read_ops": 256,
+    "write_ops": 128
+  }
+}
+```
+
+---
+
+## VM Coredump
+
+Take a memory dump (coredump) of a paused VM for offline debugging.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.coredump` |
+| **Prerequisites** | VM is paused |
+| **Response** | `204 No Content`; `404` if not created; `405` if not paused |
+
+<Warning>
+This endpoint is only available on `x86_64` and requires the `guest_debug` feature to be enabled at build time. It is not available in default builds.
+</Warning>
+
+<ParamField path="destination_url" type="string">
+  File URL to write the coredump to, e.g. `"file:///tmp/vm.coredump"`.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.coredump' \
+     -H 'Content-Type: application/json' \
+     -d '{"destination_url": "file:///tmp/vm.coredump"}'
+```

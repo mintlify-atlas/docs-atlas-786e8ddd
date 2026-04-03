@@ -1,0 +1,206 @@
+---
+title: "REST API Overview"
+description: "Introduction to the Cloud Hypervisor REST API: architecture, endpoints, and connectivity."
+---
+
+## Introduction
+
+The Cloud Hypervisor REST API provides a way to create, manage, and inspect virtual machines and the Virtual Machine Monitor (VMM). The API is designed as a collection of RPC-style, static methods — it is not a resource-oriented REST API in the traditional sense, but follows the HTTP protocol and uses JSON payloads.
+
+The API is [OpenAPI 3.0](https://github.com/OAI/OpenAPI-Specification/blob/master/versions/3.0.0.md) compliant. The full OpenAPI specification is located in the source tree at:
+
+```
+vmm/src/api/openapi/cloud-hypervisor.yaml
+```
+
+## Starting the API
+
+The REST API is available as soon as the Cloud Hypervisor binary starts. Enable it by passing `--api-socket` with either a filesystem path or a file descriptor.
+
+**Using a UNIX socket path:**
+
+```bash
+./cloud-hypervisor --api-socket path=/tmp/cloud-hypervisor.sock
+```
+
+**Using a file descriptor:**
+
+```bash
+./cloud-hypervisor --api-socket fd=<fd_number>
+```
+
+Once started, the API is immediately available for use — no separate boot step is required.
+
+## Base URL and Socket Communication
+
+All API requests are sent over a UNIX domain socket. The base URL for all endpoints is:
+
+```
+http://localhost/api/v1
+```
+
+Use `curl` with the `--unix-socket` flag to communicate with the API:
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X GET 'http://localhost/api/v1/vmm.ping'
+```
+
+<Note>
+The hostname `localhost` in the URL is required by HTTP/1.1 but is not used for routing. All traffic is sent over the UNIX socket specified with `--unix-socket`.
+</Note>
+
+## D-Bus API Alternative
+
+Cloud Hypervisor also offers a D-Bus API that fully mirrors the REST API. It exposes the same set of endpoints and consumes/produces JSON, making it a drop-in replacement for the REST API.
+
+The D-Bus API additionally exposes an `Event` signal (from the `event-monitor` crate) that clients can subscribe to for real-time VM events.
+
+**Availability:** The D-Bus API is not compiled into Cloud Hypervisor by default. It must be enabled with the `dbus_api` feature flag at build time:
+
+```bash
+./scripts/dev_cli.sh build --release --libc musl -- --features dbus_api
+```
+
+**Configuration flags:**
+
+| Flag | Description |
+| --- | --- |
+| `--dbus-service-name` | Well-known name of the D-Bus service |
+| `--dbus-object-path` | Object path to serve the D-Bus interface |
+| `--dbus-system-bus` | Use the system bus instead of the session bus |
+
+**Example invocation:**
+
+```bash
+./cloud-hypervisor \
+    --dbus-service-name "org.cloudhypervisor.DBusApi" \
+    --dbus-object-path "/org/cloudhypervisor/DBusApi"
+```
+
+This starts a service named `org.cloudhypervisor.DBusApi1`.
+
+**D-Bus Event signal definition:**
+
+```xml
+<node>
+  <interface name="org.cloudhypervisor.DBusApi1">
+    <signal name="Event">
+      <arg name="event" type="s"/>
+    </signal>
+  </interface>
+</node>
+```
+
+## Architectural Relationship
+
+The REST API, D-Bus API, and CLI are all frontends for the same internal API. The internal API is based on Rust's Multi-Producer, Single-Consumer (MPSC) module and is used by Cloud Hypervisor's internal threads to communicate.
+
+```
+                              +------------------+
+                    REST API  |                  |
+                   +--------->+    micro_http    +--------+
+                   |          |                  |        |
+                   |          +------------------+        |
+                   |                                      |      +------------------------+
+                   |                                      |      |                        |
++------------+     |            +----------+              |      |                        |
+|            |     |  D-Bus API |          |              |      | +--------------+       |
+|    User    +-----+----------->+   zbus   +--------------+------> | Internal API |       |
+|            |     |            |          |              |      | +--------------+       |
++------------+     |            +----------+              |      |                        |
+                   |                                      |      |                        |
+                   |                                      |      +------------------------+
+                   |            +----------+              |                 VMM
+                   |     CLI    |          |              |
+                   +----------->+   clap   +--------------+
+                                |          |
+                                +----------+
+```
+
+- **REST API** — Processed by an HTTP thread using Firecracker's [`micro_http`](https://github.com/firecracker-microvm/micro-http) crate. HTTP requests are translated into internal API commands.
+- **D-Bus API** — Implemented using the [`zbus`](https://github.com/dbus2/zbus) crate in its own async thread. Uses the [`blocking`](https://github.com/smol-rs/blocking) crate to call the internal API from the async context.
+- **CLI** — Options are parsed by the [`clap`](https://docs.rs/clap) crate and translated into internal API commands. The CLI can only be used at launch time; it cannot control a running VM.
+
+<Note>
+The REST API and D-Bus API can run simultaneously. Starting one does not exclude the other.
+</Note>
+
+## All Available Endpoints
+
+### VMM Endpoints
+
+| Method | Endpoint | Description | Prerequisites |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/vmm.ping` | Check API availability and get VMM info | None |
+| `PUT` | `/api/v1/vmm.shutdown` | Shut down the VMM process | VMM is running |
+
+### VM Lifecycle Endpoints
+
+| Method | Endpoint | Description | Prerequisites |
+| --- | --- | --- | --- |
+| `PUT` | `/api/v1/vm.create` | Create the VM (not yet booted) | VM not yet created |
+| `PUT` | `/api/v1/vm.delete` | Delete the VM instance | None |
+| `PUT` | `/api/v1/vm.boot` | Boot the created VM | VM created, not booted |
+| `PUT` | `/api/v1/vm.shutdown` | Shut the VM down | VM is booted |
+| `PUT` | `/api/v1/vm.reboot` | Reboot the VM | VM is booted |
+| `PUT` | `/api/v1/vm.pause` | Pause the VM | VM is booted |
+| `PUT` | `/api/v1/vm.resume` | Resume the VM | VM is paused |
+| `PUT` | `/api/v1/vm.power-button` | Trigger a power button event | VM is booted |
+| `GET` | `/api/v1/vm.info` | Get VM configuration and state | VM is created |
+| `GET` | `/api/v1/vm.counters` | Get VM device counters | VM is booted |
+| `PUT` | `/api/v1/vm.coredump` | Take a VM core dump (x86_64 + guest_debug only) | VM is paused |
+
+### Hotplug Endpoints
+
+| Method | Endpoint | Description | Prerequisites |
+| --- | --- | --- | --- |
+| `PUT` | `/api/v1/vm.resize` | Add/remove vCPUs or memory | VM is booted |
+| `PUT` | `/api/v1/vm.resize-zone` | Resize a memory zone | VM is booted |
+| `PUT` | `/api/v1/vm.resize-disk` | Resize an attached disk | VM is created |
+| `PUT` | `/api/v1/vm.add-device` | Hot-add a VFIO PCI device | VM is booted |
+| `PUT` | `/api/v1/vm.add-disk` | Hot-add a disk device | VM is booted |
+| `PUT` | `/api/v1/vm.add-fs` | Hot-add a virtio-fs device | VM is booted |
+| `PUT` | `/api/v1/vm.add-net` | Hot-add a network device | VM is booted |
+| `PUT` | `/api/v1/vm.add-pmem` | Hot-add a pmem device | VM is booted |
+| `PUT` | `/api/v1/vm.add-vsock` | Hot-add a vsock device | VM is booted |
+| `PUT` | `/api/v1/vm.add-vdpa` | Hot-add a vDPA device | VM is booted |
+| `PUT` | `/api/v1/vm.add-user-device` | Hot-add a userspace PCI device | VM is booted |
+| `PUT` | `/api/v1/vm.add-generic-vhost-user` | Hot-add a generic vhost-user device | VM is booted |
+| `PUT` | `/api/v1/vm.remove-device` | Remove a device by ID | VM is booted |
+
+### Snapshot, Restore & Migration Endpoints
+
+| Method | Endpoint | Description | Prerequisites |
+| --- | --- | --- | --- |
+| `PUT` | `/api/v1/vm.snapshot` | Take a VM snapshot | VM is paused |
+| `PUT` | `/api/v1/vm.restore` | Restore VM from a snapshot | VM created, not booted |
+| `PUT` | `/api/v1/vm.receive-migration` | Prepare to receive a live migration | None |
+| `PUT` | `/api/v1/vm.send-migration` | Send a live migration to a target | VM is booted; shared memory or hugepages required |
+| `PUT` | `/api/v1/vm.nmi` | Inject a non-maskable interrupt (NMI) | VM is booted |
+
+## Basic Connectivity Example
+
+Start Cloud Hypervisor with the API socket:
+
+```bash
+./cloud-hypervisor --api-socket path=/tmp/cloud-hypervisor.sock
+```
+
+Verify the API is reachable:
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X GET 'http://localhost/api/v1/vmm.ping' \
+     -H 'Accept: application/json'
+```
+
+A successful response returns HTTP 200 with a JSON body like:
+
+```json
+{
+  "version": "v40.0.0",
+  "pid": 12345,
+  "features": ["acpi", "cmos_rtc", ...]
+}
+```

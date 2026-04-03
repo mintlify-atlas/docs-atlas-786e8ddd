@@ -1,0 +1,289 @@
+---
+title: "Console & Serial Configuration"
+description: "Configure virtio-console and serial port output for Cloud Hypervisor VMs, including TTY, PTY, file, and socket output modes."
+---
+
+Cloud Hypervisor provides two independent console paths: a `virtio-console` device (`--console`) and an emulated serial port (`--serial`). They serve different purposes and can be used simultaneously or independently.
+
+## ConsoleConfig struct
+
+```rust
+pub enum ConsoleOutputMode {
+    Off,
+    Pty,
+    Tty,
+    File,
+    Socket,
+    Null,
+}
+
+pub struct ConsoleConfig {
+    pub file: Option<PathBuf>,
+    pub mode: ConsoleOutputMode,
+    pub iommu: bool,
+    pub socket: Option<PathBuf>,
+}
+```
+
+---
+
+## `--console` flag
+
+Controls the `virtio-console` device. This is a high-performance paravirtualized console that is enabled by default. It provides a complete console implementation with lower overhead than the serial port.
+
+**Default:** `--console on` (TTY mode).
+
+### Syntax
+
+```
+--console off|null|tty|pty|file=<path>|socket=<path>
+```
+
+### Modes
+
+<ParamField path="off" type="mode">
+  Disable the virtio-console device entirely. Use this when you want to use only the serial port (`--serial tty`) or no console at all.
+</ParamField>
+
+<ParamField path="null" type="mode">
+  The virtio-console device is present but all output is discarded and input is empty. Useful for automated/headless VMs that do not need interactive console access.
+</ParamField>
+
+<ParamField path="tty" type="mode">
+  Connect the virtio-console to the current terminal (stdin/stdout). Output from the guest appears directly in the terminal. This is the default mode.
+</ParamField>
+
+<ParamField path="pty" type="mode">
+  Allocate a pseudo-terminal (PTY) for the virtio-console. Cloud Hypervisor prints the PTY device path (e.g. `/dev/pts/3`) on startup. Connect to it with `screen`, `minicom`, or another terminal emulator.
+</ParamField>
+
+<ParamField path="file=<path>" type="mode">
+  Write all virtio-console output to a file at the specified path. Useful for logging guest console output to disk for later inspection.
+</ParamField>
+
+<ParamField path="socket=<path>" type="mode">
+  Expose the virtio-console over a Unix socket. Allows connecting to the console from another process.
+</ParamField>
+
+---
+
+## `--serial` flag
+
+Controls the emulated legacy serial port. On x86-64, this is a 16550A UART device accessible via `console=ttyS0` in the kernel command line. On AArch64, it is a PL011 UART accessible via `console=ttyAMA0`.
+
+The serial port is disabled by default (`--serial off`). It is particularly useful for capturing early kernel boot messages that appear before `virtio-console` is initialized.
+
+**Default:** `--serial off`.
+
+### Syntax
+
+```
+--serial off|null|tty|pty|file=<path>|socket=<path>
+```
+
+The modes are identical to those for `--console`.
+
+---
+
+## virtio-console vs serial port
+
+| Feature | virtio-console (`--console`) | Serial port (`--serial`) |
+|---------|------------------------------|--------------------------|
+| Type | Paravirtualized virtio device | Emulated legacy hardware |
+| Default state | Enabled (tty) | Disabled |
+| Early boot messages | Not available — driver loads late | Available from kernel start |
+| Performance | Higher (virtio) | Lower (emulated I/O port) |
+| Kernel cmdline | `console=hvc0` | `console=ttyS0` (x86) / `console=ttyAMA0` (AArch64) |
+| Windows guests | Not typically used | Available |
+
+<Tip>
+For production Linux VMs, use `virtio-console` with `console=hvc0`. For debugging early boot issues, switch to the serial port with `--serial tty --console off` and `console=ttyS0`.
+</Tip>
+
+---
+
+## Common configurations
+
+<Tabs>
+  <Tab title="virtio-console (default)">
+    The default configuration. Guest output appears in the current terminal.
+
+    ```bash
+    ./cloud-hypervisor \
+      --kernel ./vmlinux \
+      --disk path=focal.raw \
+      --cpus boot=4 \
+      --memory size=1G \
+      --cmdline "console=hvc0 root=/dev/vda1 rw" \
+      --net "tap=,mac=,ip=,mask="
+    ```
+  </Tab>
+  <Tab title="Serial port for early boot">
+    Switch to the serial port to capture kernel messages from the very start of boot. The virtio-console is disabled.
+
+    **x86-64:**
+    ```bash
+    ./cloud-hypervisor \
+      --kernel ./vmlinux \
+      --disk path=focal.raw \
+      --cpus boot=4 \
+      --memory size=1G \
+      --cmdline "console=ttyS0 root=/dev/vda1 rw" \
+      --serial tty \
+      --console off
+    ```
+
+    **AArch64:**
+    ```bash
+    ./cloud-hypervisor \
+      --kernel ./Image \
+      --disk path=focal-arm64.raw \
+      --cpus boot=4 \
+      --memory size=1G \
+      --cmdline "console=ttyAMA0 root=/dev/vda1 rw" \
+      --serial tty \
+      --console off
+    ```
+  </Tab>
+  <Tab title="Both serial and virtio-console">
+    Use both simultaneously — serial for early boot messages, virtio-console as the primary console after drivers load.
+
+    ```bash
+    ./cloud-hypervisor \
+      --kernel ./vmlinux \
+      --disk path=focal.raw \
+      --cpus boot=4 \
+      --memory size=1G \
+      --cmdline "console=ttyS0 console=hvc0 root=/dev/vda1 rw" \
+      --serial tty \
+      --console tty
+    ```
+
+    In this configuration, early kernel messages appear on the serial port (`ttyS0`) and later messages appear on both (`console=hvc0` takes over once the driver loads).
+  </Tab>
+  <Tab title="PTY (remote attach)">
+    Allocate a PTY so you can attach to the console from a separate terminal process.
+
+    ```bash
+    ./cloud-hypervisor \
+      --kernel ./vmlinux \
+      --disk path=focal.raw \
+      --memory size=1G \
+      --cmdline "console=hvc0 root=/dev/vda1 rw" \
+      --console pty
+    # Output: "Console is on /dev/pts/3"
+
+    # In another terminal:
+    screen /dev/pts/3
+    ```
+  </Tab>
+  <Tab title="Log to file">
+    Capture console output to a file for post-mortem inspection.
+
+    ```bash
+    ./cloud-hypervisor \
+      --kernel ./vmlinux \
+      --disk path=focal.raw \
+      --memory size=1G \
+      --cmdline "console=hvc0 root=/dev/vda1 rw" \
+      --console file=/var/log/vm-console.log
+
+    # Tail the log in real time
+    tail -f /var/log/vm-console.log
+    ```
+  </Tab>
+  <Tab title="Headless (null)">
+    Suppress all console output for automated or CI workloads.
+
+    ```bash
+    ./cloud-hypervisor \
+      --kernel ./vmlinux \
+      --disk path=focal.raw \
+      --memory size=1G \
+      --cmdline "console=hvc0 root=/dev/vda1 rw" \
+      --console null \
+      --serial null
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Firmware boot and serial console
+
+When booting with a firmware (e.g. `hypervisor-fw` or edk2), you may need access to the serial console to interact with GRUB or see firmware messages:
+
+```bash
+# Firmware boot with serial console for GRUB/firmware interaction
+./cloud-hypervisor \
+  --kernel ./hypervisor-fw \
+  --disk path=focal-server-cloudimg-amd64.raw \
+         path=/tmp/ubuntu-cloudinit.img \
+  --cpus boot=4 \
+  --memory size=1024M \
+  --net "tap=,mac=,ip=,mask=" \
+  --serial tty \
+  --console off
+```
+
+<Note>
+When using `--firmware`, `--serial tty --console off` is required if you need to interact with the GRUB menu or see firmware-level messages. The default virtio-console is not available until the guest OS driver loads.
+</Note>
+
+---
+
+## Examples
+
+<CodeGroup>
+
+```bash Default (virtio-console, TTY)
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --cpus boot=2 \
+  --memory size=1G \
+  --cmdline "console=hvc0 root=/dev/vda1 rw"
+# Equivalent to: --console tty --serial off
+```
+
+```bash Serial only (early boot debug)
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --console off \
+  --serial tty \
+  --disk path=focal.raw \
+  --cpus boot=2 \
+  --memory size=1G \
+  --cmdline "console=ttyS0 root=/dev/vda1 rw"
+```
+
+```bash PTY console (detached terminal)
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=1G \
+  --cmdline "console=hvc0 root=/dev/vda1 rw" \
+  --console pty \
+  --serial off
+```
+
+```bash Console output to file
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=1G \
+  --cmdline "console=hvc0 root=/dev/vda1 rw" \
+  --console file=/tmp/vm-output.log
+```
+
+```bash No console (headless)
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=1G \
+  --cmdline "root=/dev/vda1 rw" \
+  --console null \
+  --serial null
+```
+
+</CodeGroup>

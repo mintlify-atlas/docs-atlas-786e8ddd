@@ -1,97 +1,89 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Cloud Hypervisor"
+description: "A security-focused Virtual Machine Monitor (VMM) written in Rust for running modern cloud workloads on KVM and Microsoft Hypervisor (MSHV)."
 ---
 
-## Setting up
+Cloud Hypervisor is an open source Virtual Machine Monitor (VMM) that runs on top of the KVM hypervisor and the Microsoft Hypervisor (MSHV). Written in Rust with a focus on security, it supports CPU, memory and PCI hotplug, live migration, snapshot/restore, and device offload via vhost-user — designed for the demands of modern cloud workloads.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Boot your first VM in minutes using pre-built binaries
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Building from Source" icon="hammer" href="/building">
+    Build Cloud Hypervisor from source with Rust and Cargo
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="REST API Reference" icon="code" href="/api/overview">
+    Control and manage VMs programmatically via the REST API
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="CLI Reference" icon="terminal" href="/cli/cloud-hypervisor">
+    Full reference for all cloud-hypervisor and ch-remote flags
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Key features
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="CPU & Memory Hotplug" icon="microchip" href="/features/hotplug">
+    Add and remove vCPUs and memory from running VMs using ACPI or virtio-mem
+  </Card>
+  <Card title="Device Passthrough (VFIO)" icon="plug" href="/features/vfio-passthrough">
+    Directly assign host PCI devices to guest VMs for near-native performance
+  </Card>
+  <Card title="Live Migration" icon="arrow-right-arrow-left" href="/features/live-migration">
+    Migrate running VMs between hosts over UNIX socket or TCP with minimal downtime
+  </Card>
+  <Card title="Snapshot & Restore" icon="floppy-disk" href="/features/snapshot-restore">
+    Pause, snapshot, and restore VMs to create identical replicas
+  </Card>
+  <Card title="virtio-fs Filesystem Sharing" icon="folder-open" href="/features/virtiofs">
+    Share directories between host and guest with high-performance virtio-fs
+  </Card>
+  <Card title="Security Hardening" icon="shield-halved" href="/operations/seccomp">
+    Seccomp and Landlock sandboxing reduce the attack surface of the VMM
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Getting started
 
-## Need inspiration?
+<Steps>
+  <Step title="Download a pre-built binary">
+    Grab the latest static binary for your architecture from the [GitHub releases page](https://github.com/cloud-hypervisor/cloud-hypervisor/releases/latest). Use `cloud-hypervisor-static` for x86-64 or `cloud-hypervisor-static-aarch64` for AArch64.
+  </Step>
+  <Step title="Prepare a guest image">
+    Download a cloud image and convert it to raw format:
+    ```bash
+    wget https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img
+    qemu-img convert -p -f qcow2 -O raw jammy-server-cloudimg-amd64.img jammy-server-cloudimg-amd64.raw
+    ```
+  </Step>
+  <Step title="Boot your first VM">
+    Launch Cloud Hypervisor with a firmware and disk image:
+    ```bash
+    ./cloud-hypervisor \
+      --firmware ./hypervisor-fw \
+      --disk path=jammy-server-cloudimg-amd64.raw \
+      --cpus boot=2 \
+      --memory size=1024M \
+      --net "tap=,mac=,ip=,mask="
+    ```
+  </Step>
+  <Step title="Manage via REST API">
+    Start with the API socket to manage the VM at runtime:
+    ```bash
+    ./cloud-hypervisor --api-socket /tmp/cloud-hypervisor.sock
+    curl --unix-socket /tmp/cloud-hypervisor.sock -X GET 'http://localhost/api/v1/vm.info'
+    ```
+  </Step>
+</Steps>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+## Supported platforms
+
+| Architecture | Status |
+|---|---|
+| x86-64 | Fully supported |
+| AArch64 | Fully supported |
+| riscv64 | Experimental |
+
+<Note>
+  Cloud Hypervisor requires a host kernel version of 5.13 or later for full KVM functionality and best performance. Most CI testing uses kernel 5.15.
+</Note>

@@ -1,0 +1,118 @@
+---
+title: "virtio-fs Filesystem Sharing"
+description: "Share host directories with Cloud Hypervisor guests efficiently and securely using virtio-fs (vhost-user-fs) and the virtiofsd daemon."
+---
+
+**virtio-fs** (also known as **vhost-user-fs**) is a virtual device defined by the VIRTIO specification that enables filesystem sharing between a host and a VM. It provides better performance and stronger POSIX semantics than older approaches like Plan 9 or NFS, and is the recommended way to share directories with Cloud Hypervisor guests.
+
+virtio-fs relies on the _vhost-user_ protocol: device emulation is handled by a dedicated process on the host called **virtiofsd**. Cloud Hypervisor connects to this daemon through a UNIX socket, and the guest mounts the shared filesystem using the `virtiofs` filesystem type.
+
+---
+
+## Prerequisites
+
+### Kernel Support
+
+The guest must run a Linux kernel at **v5.10 or later**. Modern cloud images typically satisfy this requirement. Older kernels with additional patches are not supported.
+
+### Build virtiofsd
+
+The `virtiofsd` daemon is maintained separately from Cloud Hypervisor:
+
+```bash
+git clone https://gitlab.com/virtio-fs/virtiofsd
+cd virtiofsd
+cargo build --release
+sudo setcap cap_sys_admin+epi target/release/virtiofsd
+```
+
+---
+
+## Setup Workflow
+
+<Steps>
+  <Step title="Create the shared directory on the host">
+    ```bash
+    mkdir /tmp/shared_dir
+    ```
+  </Step>
+
+  <Step title="Start virtiofsd">
+    Run the daemon, pointing it at the shared directory and a UNIX socket path that Cloud Hypervisor will connect to:
+
+    ```bash
+    ./virtiofsd \
+        --log-level debug \
+        --socket-path=/tmp/virtiofs \
+        --shared-dir=/tmp/shared_dir \
+        --cache=never \
+        --thread-pool-size=$N
+    ```
+
+    Keep this process running while the VM is active.
+
+    <Note>
+      **Cache options:**
+      - `cache=never` (default for Cloud Hypervisor): Bypasses the host page cache. Reduces host memory footprint and increases VM density on a single host.
+      - `cache=always`: Uses the host page cache. May improve guest workload performance at the cost of higher host memory usage.
+
+      The `thread-pool-size` option controls the number of I/O worker threads. For fast storage like NVMe, increasing this value is important for achieving acceptable throughput compared to native performance.
+    </Note>
+  </Step>
+
+  <Step title="Start Cloud Hypervisor with --fs">
+    Use the `--fs` flag to connect to the virtiofsd socket. **Shared memory (`--memory shared=on`) is required** for inter-process memory sharing between Cloud Hypervisor and virtiofsd:
+
+    ```bash
+    ./cloud-hypervisor \
+        --cpus boot=1 \
+        --memory size=1G,shared=on \
+        --disk path=focal-server-cloudimg-amd64.raw \
+        --kernel vmlinux \
+        --cmdline "console=hvc0 root=/dev/vda1 rw" \
+        --fs tag=myfs,socket=/tmp/virtiofs,num_queues=1,queue_size=512
+    ```
+
+    The `tag` value (`myfs` here) is used to mount the filesystem inside the guest. Choose any tag name — it must match what you use in the mount command below.
+
+    Both direct kernel boot and EFI firmware are supported for VMs using virtio-fs.
+  </Step>
+
+  <Step title="Mount the shared directory inside the guest">
+    Once the VM is running, mount the virtio-fs filesystem using the `virtiofs` type and the tag defined at launch:
+
+    ```bash
+    mkdir mount_dir
+    mount -t virtiofs myfs mount_dir/
+    ```
+
+    The contents of `/tmp/shared_dir` on the host are now accessible inside the VM at `mount_dir/`.
+  </Step>
+</Steps>
+
+---
+
+## Hotplugging a virtio-fs Device
+
+A virtio-fs device can be added to a running VM via the API (requires `--api-socket` at launch):
+
+```shell
+./ch-remote --api-socket=/tmp/ch-socket add-fs tag=myfs,socket=/foo/bar/virtiofs.sock
+```
+
+---
+
+## DAX Window
+
+The DAX (Direct Access) feature for virtio-fs, which allows memory-mapping files directly from the host into the guest address space, is not currently available in Cloud Hypervisor. The DAX feature is still considered unstable from the virtiofsd daemon's perspective.
+
+---
+
+## Summary of `--fs` Parameters
+
+| Parameter | Description |
+|---|---|
+| `tag` | Filesystem tag used to mount inside the guest. Must match the `mount -t virtiofs <tag>` argument. |
+| `socket` | Path to the UNIX socket that virtiofsd is listening on. |
+| `num_queues` | Number of virtio queues. Increase for higher concurrency. |
+| `queue_size` | Size of each virtio queue. |

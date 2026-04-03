@@ -1,0 +1,125 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "Cloud Hypervisor",
+  "projectDescription": "A security-focused Virtual Machine Monitor (VMM) written in Rust for running modern cloud workloads on KVM and Microsoft Hypervisor (MSHV).",
+  "theme": "aspen",
+  "primaryColor": "#9aabb4",
+  "lightColor": "#cdd5dc",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "building"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/cpu",
+              "configuration/memory",
+              "configuration/networking",
+              "configuration/storage",
+              "configuration/console"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/hotplug",
+              "features/device-model",
+              "features/snapshot-restore",
+              "features/live-migration",
+              "features/vfio-passthrough",
+              "features/virtiofs",
+              "features/windows-guests"
+            ]
+          },
+          {
+            "group": "Security & Operations",
+            "pages": [
+              "operations/seccomp",
+              "operations/landlock",
+              "operations/logging-tracing",
+              "operations/performance"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "REST API",
+            "pages": [
+              "api/overview",
+              "api/vm-lifecycle",
+              "api/hotplug-endpoints",
+              "api/migration-endpoints"
+            ]
+          },
+          {
+            "group": "CLI Reference",
+            "pages": [
+              "cli/cloud-hypervisor",
+              "cli/ch-remote"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "CPU and memory hotplug with ACPI and virtio-mem support",
+    "PCI device hotplug and VFIO direct device passthrough",
+    "Live VM migration (local UNIX socket and remote TCP)",
+    "Snapshot and restore across identical VMM versions",
+    "vhost-user device offload (block, network, filesystem)",
+    "virtio-fs shared filesystem via virtiofsd",
+    "Windows 10/Server and Linux guest OS support",
+    "REST API and D-Bus API for runtime VM management",
+    "Seccomp and Landlock sandboxing for security hardening",
+    "Multi-architecture support: x86-64, AArch64, riscv64 (experimental)",
+    "OpenAPI 3.0 compliant REST interface",
+    "KVM and Microsoft Hypervisor (MSHV) backend support"
+  ],
+  "publicApiSurface": [
+    "POST /api/v1/vm.create",
+    "PUT /api/v1/vm.boot",
+    "PUT /api/v1/vm.shutdown",
+    "PUT /api/v1/vm.reboot",
+    "PUT /api/v1/vm.pause",
+    "PUT /api/v1/vm.resume",
+    "GET /api/v1/vm.info",
+    "PUT /api/v1/vm.resize",
+    "PUT /api/v1/vm.resize-zone",
+    "PUT /api/v1/vm.add-device",
+    "PUT /api/v1/vm.add-disk",
+    "PUT /api/v1/vm.add-net",
+    "PUT /api/v1/vm.add-fs",
+    "PUT /api/v1/vm.add-pmem",
+    "PUT /api/v1/vm.add-vsock",
+    "PUT /api/v1/vm.add-vdpa",
+    "PUT /api/v1/vm.remove-device",
+    "PUT /api/v1/vm.snapshot",
+    "PUT /api/v1/vm.restore",
+    "PUT /api/v1/vm.send-migration",
+    "PUT /api/v1/vm.receive-migration",
+    "PUT /api/v1/vm.counters",
+    "GET /api/v1/vmm.ping",
+    "PUT /api/v1/vmm.shutdown",
+    "cloud-hypervisor --cpus --memory --kernel --firmware --disk --net --fs --vsock --device --pmem --serial --console --api-socket",
+    "ch-remote resize --cpus --memory",
+    "ch-remote add-device / add-disk / add-net / add-fs / add-pmem / add-vsock",
+    "ch-remote remove-device",
+    "ch-remote snapshot / restore",
+    "ch-remote send-migration / receive-migration",
+    "ch-remote pause / resume / reboot / shutdown / power-button"
+  ]
+}

@@ -1,0 +1,587 @@
+---
+title: "Hotplug Endpoints"
+description: "API reference for adding, removing, and resizing devices in a running Cloud Hypervisor VM."
+---
+
+All hotplug endpoints require the VM to be in the **booted** state unless otherwise noted. Devices added while the VM is running are hot-plugged; they become immediately visible to the guest without a reboot.
+
+Successful add operations return either `200 OK` with a `PciDeviceInfo` body (hot-plug) or `204 No Content` (cold-add). Successful remove and resize operations return `204 No Content`.
+
+**PciDeviceInfo response fields:**
+
+<ResponseField name="id" type="string" required>
+  Logical identifier for the device as known to Cloud Hypervisor.
+</ResponseField>
+
+<ResponseField name="bdf" type="string" required>
+  PCI Bus:Device:Function address assigned to the device (e.g. `"0000:00:05.0"`).
+</ResponseField>
+
+---
+
+## Resize VM (vCPUs and/or Memory)
+
+Add or remove vCPUs and/or adjust the amount of guest RAM or balloon memory.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.resize` |
+| **Prerequisites** | VM is booted |
+| **Response** | `204 No Content`; `404` if not created; `429` if a vCPU removal is still pending |
+
+<ParamField path="desired_vcpus" type="integer">
+  Target number of vCPUs. Must be ≥ 1 and ≤ `max_vcpus` set at VM creation.
+</ParamField>
+
+<ParamField path="desired_ram" type="integer">
+  Target memory size in bytes. The VM must have been configured with a `hotplug_size` to allow growth.
+</ParamField>
+
+<ParamField path="desired_balloon" type="integer">
+  Target virtio balloon size in bytes. Requires a `balloon` device to be configured in the VM.
+</ParamField>
+
+```bash
+# Resize to 8 vCPUs and 4 GB RAM
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.resize' \
+     -H 'Content-Type: application/json' \
+     -d '{"desired_vcpus": 8, "desired_ram": 4294967296}'
+```
+
+---
+
+## Resize Memory Zone
+
+Resize a named memory zone that was created as part of the VM configuration.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.resize-zone` |
+| **Prerequisites** | VM is booted |
+| **Response** | `204 No Content`; `500` on failure |
+
+<ParamField path="id" type="string">
+  Identifier of the memory zone to resize (must match a zone `id` from `VmConfig.memory.zones`).
+</ParamField>
+
+<ParamField path="desired_ram" type="integer">
+  New size for the memory zone in bytes.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.resize-zone' \
+     -H 'Content-Type: application/json' \
+     -d '{"id": "mem0", "desired_ram": 2147483648}'
+```
+
+---
+
+## Resize Disk
+
+Resize a disk device that is attached to the VM.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.resize-disk` |
+| **Prerequisites** | VM is created (does not need to be running) |
+| **Response** | `204 No Content`; `500` on failure |
+
+<ParamField path="id" type="string">
+  Identifier of the disk device to resize (the `id` field from its `DiskConfig`).
+</ParamField>
+
+<ParamField path="desired_size" type="integer">
+  New disk size in bytes.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.resize-disk' \
+     -H 'Content-Type: application/json' \
+     -d '{"id": "disk0", "desired_size": 53687091200}'
+```
+
+---
+
+## Add VFIO/PCI Device
+
+Hot-add a host PCI device to the VM using VFIO passthrough.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.add-device` |
+| **Prerequisites** | VM is booted |
+| **Response** | `200 OK` with `PciDeviceInfo`; `204` for cold-add; `404` on failure |
+
+<ParamField path="path" type="string" required>
+  Sysfs path to the VFIO device, e.g. `"/sys/bus/pci/devices/0000:01:00.0"`.
+</ParamField>
+
+<ParamField path="iommu" type="boolean">
+  Place the device behind a virtual IOMMU. Default: `false`.
+</ParamField>
+
+<ParamField path="id" type="string">
+  Optional logical identifier for the device. Used when removing the device later.
+</ParamField>
+
+<ParamField path="pci_segment" type="integer">
+  PCI segment to assign the device to.
+</ParamField>
+
+<ParamField path="x_nv_gpudirect_clique" type="integer">
+  NVIDIA GPUDirect clique ID (experimental).
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.add-device' \
+     -H 'Content-Type: application/json' \
+     -d '{"path": "/sys/bus/pci/devices/0000:01:00.0", "id": "gpu0"}'
+```
+
+---
+
+## Add Disk
+
+Hot-add a virtio block disk device to the running VM.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.add-disk` |
+| **Prerequisites** | VM is booted |
+| **Response** | `200 OK` with `PciDeviceInfo`; `204` for cold-add; `500` on failure |
+
+<ParamField path="path" type="string">
+  Path to the disk image file. Required unless `vhost_user` is `true`.
+</ParamField>
+
+<ParamField path="readonly" type="boolean">
+  Mount the disk as read-only. Default: `false`.
+</ParamField>
+
+<ParamField path="direct" type="boolean">
+  Use `O_DIRECT` for I/O (bypasses host page cache). Default: `false`.
+</ParamField>
+
+<ParamField path="iommu" type="boolean">
+  Place the device behind a virtual IOMMU. Default: `false`.
+</ParamField>
+
+<ParamField path="num_queues" type="integer">
+  Number of virtio queues. Default: `1`.
+</ParamField>
+
+<ParamField path="queue_size" type="integer">
+  Size of each virtio queue. Default: `128`.
+</ParamField>
+
+<ParamField path="vhost_user" type="boolean">
+  Use vhost-user backend instead of in-process emulation. Default: `false`.
+</ParamField>
+
+<ParamField path="vhost_socket" type="string">
+  Path to vhost-user socket (required when `vhost_user` is `true`).
+</ParamField>
+
+<ParamField path="id" type="string">
+  Logical identifier for the disk. Used for resize and removal.
+</ParamField>
+
+<ParamField path="serial" type="string">
+  Serial number string exposed to the guest.
+</ParamField>
+
+<ParamField path="pci_segment" type="integer">
+  PCI segment to assign the disk to.
+</ParamField>
+
+<ParamField path="rate_limiter_config" type="object">
+  I/O rate limiter with optional `bandwidth` and `ops` token buckets.
+</ParamField>
+
+<ParamField path="rate_limit_group" type="string">
+  Name of a rate-limit group (defined in `VmConfig.rate_limit_groups`) to share across disks.
+</ParamField>
+
+<ParamField path="queue_affinity" type="array">
+  Per-queue host CPU affinity (`queue_index`, `host_cpus`).
+</ParamField>
+
+<ParamField path="image_type" type="string">
+  Disk image format: `"Raw"`, `"Qcow2"`, `"FixedVhd"`, `"Vhdx"`, or `"Unknown"`.
+</ParamField>
+
+<ParamField path="backing_files" type="boolean">
+  Enable backing file support (for layered disk images). Default: `false`.
+</ParamField>
+
+<ParamField path="sparse" type="boolean">
+  Enable sparse file support. Default: `true`.
+</ParamField>
+
+<ParamField path="lock_granularity" type="string">
+  Disk locking granularity: `"ByteRange"` or `"Full"`. Default: `"ByteRange"`.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.add-disk' \
+     -H 'Content-Type: application/json' \
+     -d '{"path": "/opt/images/data.raw", "id": "data-disk"}'
+```
+
+---
+
+## Add virtio-fs Device
+
+Hot-add a virtio-fs shared filesystem device to the running VM.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.add-fs` |
+| **Prerequisites** | VM is booted |
+| **Response** | `200 OK` with `PciDeviceInfo`; `204` for cold-add; `500` on failure |
+
+<ParamField path="tag" type="string" required>
+  Mount tag used by the guest to identify this filesystem (e.g. passed to `mount -t virtiofs <tag> /mnt`).
+</ParamField>
+
+<ParamField path="socket" type="string" required>
+  Path to the virtiofsd UNIX socket.
+</ParamField>
+
+<ParamField path="num_queues" type="integer" required>
+  Number of virtio queues. Default: `1`.
+</ParamField>
+
+<ParamField path="queue_size" type="integer" required>
+  Size of each virtio queue. Default: `1024`.
+</ParamField>
+
+<ParamField path="id" type="string">
+  Logical identifier for the device.
+</ParamField>
+
+<ParamField path="pci_segment" type="integer">
+  PCI segment to assign the device to.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.add-fs' \
+     -H 'Content-Type: application/json' \
+     -d '{"tag": "shared", "socket": "/tmp/virtiofsd.sock", "num_queues": 1, "queue_size": 1024}'
+```
+
+---
+
+## Add Network Device
+
+Hot-add a virtio network interface to the running VM.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.add-net` |
+| **Prerequisites** | VM is booted |
+| **Response** | `200 OK` with `PciDeviceInfo`; `204` for cold-add; `500` on failure |
+
+<ParamField path="tap" type="string">
+  Name of an existing TAP interface on the host. If omitted, Cloud Hypervisor creates one automatically.
+</ParamField>
+
+<ParamField path="ip" type="string">
+  IP address for the TAP interface on the host side. Default: `"192.168.249.1"`. Accepts IPv4 or IPv6.
+</ParamField>
+
+<ParamField path="mask" type="string">
+  Network mask for the TAP interface. Default: `"255.255.255.0"`. Must match the address family of `ip`.
+</ParamField>
+
+<ParamField path="mac" type="string">
+  MAC address to assign to the guest NIC.
+</ParamField>
+
+<ParamField path="host_mac" type="string">
+  MAC address to assign to the host-side TAP interface.
+</ParamField>
+
+<ParamField path="mtu" type="integer">
+  MTU for the network interface.
+</ParamField>
+
+<ParamField path="iommu" type="boolean">
+  Place the device behind a virtual IOMMU. Default: `false`.
+</ParamField>
+
+<ParamField path="num_queues" type="integer">
+  Number of virtio queues (must be even: one TX + one RX per pair). Default: `2`.
+</ParamField>
+
+<ParamField path="queue_size" type="integer">
+  Size of each virtio queue. Default: `256`.
+</ParamField>
+
+<ParamField path="vhost_user" type="boolean">
+  Use vhost-user backend. Default: `false`.
+</ParamField>
+
+<ParamField path="vhost_socket" type="string">
+  Path to vhost-user socket (required when `vhost_user` is `true`).
+</ParamField>
+
+<ParamField path="vhost_mode" type="string">
+  Vhost-user mode: `"Client"` or `"Server"`. Default: `"Client"`.
+</ParamField>
+
+<ParamField path="id" type="string">
+  Logical identifier for the network device.
+</ParamField>
+
+<ParamField path="pci_segment" type="integer">
+  PCI segment to assign the device to.
+</ParamField>
+
+<ParamField path="rate_limiter_config" type="object">
+  I/O rate limiter with optional `bandwidth` and `ops` token buckets.
+</ParamField>
+
+<ParamField path="offload_tso" type="boolean">
+  Enable TCP Segmentation Offload. Default: `true`.
+</ParamField>
+
+<ParamField path="offload_ufo" type="boolean">
+  Enable UDP Fragmentation Offload. Default: `true`.
+</ParamField>
+
+<ParamField path="offload_csum" type="boolean">
+  Enable checksum offload. Default: `true`.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.add-net' \
+     -H 'Content-Type: application/json' \
+     -d '{"ip": "192.168.10.10", "mask": "255.255.255.0", "mac": "12:34:56:78:90:02"}'
+```
+
+---
+
+## Add pmem Device
+
+Hot-add a persistent memory (PMEM / NVDIMM) device backed by a file.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.add-pmem` |
+| **Prerequisites** | VM is booted |
+| **Response** | `200 OK` with `PciDeviceInfo`; `204` for cold-add; `500` on failure |
+
+<ParamField path="file" type="string" required>
+  Path to the backing file for the PMEM device.
+</ParamField>
+
+<ParamField path="size" type="integer">
+  Size of the PMEM region in bytes. Defaults to the file size if not specified.
+</ParamField>
+
+<ParamField path="iommu" type="boolean">
+  Place the device behind a virtual IOMMU. Default: `false`.
+</ParamField>
+
+<ParamField path="discard_writes" type="boolean">
+  Make the PMEM region read-only (writes are discarded). Default: `false`.
+</ParamField>
+
+<ParamField path="id" type="string">
+  Logical identifier for the PMEM device.
+</ParamField>
+
+<ParamField path="pci_segment" type="integer">
+  PCI segment to assign the device to.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.add-pmem' \
+     -H 'Content-Type: application/json' \
+     -d '{"file": "/opt/pmem/data.img", "size": 1073741824}'
+```
+
+---
+
+## Add vsock Device
+
+Hot-add a virtio vsock device to the running VM.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.add-vsock` |
+| **Prerequisites** | VM is booted |
+| **Response** | `200 OK` with `PciDeviceInfo`; `204` for cold-add; `500` on failure |
+
+<ParamField path="cid" type="integer" required>
+  Context ID (CID) for the guest vsock socket. Must be ≥ 3 (0, 1, and 2 are reserved).
+</ParamField>
+
+<ParamField path="socket" type="string" required>
+  Path to the UNIX domain socket used to proxy vsock connections on the host.
+</ParamField>
+
+<ParamField path="iommu" type="boolean">
+  Place the device behind a virtual IOMMU. Default: `false`.
+</ParamField>
+
+<ParamField path="id" type="string">
+  Logical identifier for the vsock device.
+</ParamField>
+
+<ParamField path="pci_segment" type="integer">
+  PCI segment to assign the device to.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.add-vsock' \
+     -H 'Content-Type: application/json' \
+     -d '{"cid": 3, "socket": "/tmp/vsock.sock"}'
+```
+
+---
+
+## Add vDPA Device
+
+Hot-add a vDPA (virtio Data Path Accelerator) device.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.add-vdpa` |
+| **Prerequisites** | VM is booted |
+| **Response** | `200 OK` with `PciDeviceInfo`; `204` for cold-add; `500` on failure |
+
+<ParamField path="path" type="string" required>
+  Path to the vDPA device node (e.g. `"/dev/vhost-vdpa-0"`).
+</ParamField>
+
+<ParamField path="num_queues" type="integer" required>
+  Number of virtio queues to configure. Default: `1`.
+</ParamField>
+
+<ParamField path="iommu" type="boolean">
+  Place the device behind a virtual IOMMU. Default: `false`.
+</ParamField>
+
+<ParamField path="id" type="string">
+  Logical identifier for the vDPA device.
+</ParamField>
+
+<ParamField path="pci_segment" type="integer">
+  PCI segment to assign the device to.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.add-vdpa' \
+     -H 'Content-Type: application/json' \
+     -d '{"path": "/dev/vhost-vdpa-0", "num_queues": 2, "id": "vdpa0"}'
+```
+
+---
+
+## Add Userspace PCI Device
+
+Hot-add a userspace PCI device (backed by a vhost-user socket that implements a custom PCI device).
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.add-user-device` |
+| **Prerequisites** | VM is booted |
+| **Response** | `200 OK` with `PciDeviceInfo`; `204` for cold-add; `404` on failure |
+
+<ParamField path="socket" type="string" required>
+  Path to the UNIX socket of the userspace device backend.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.add-user-device' \
+     -H 'Content-Type: application/json' \
+     -d '{"socket": "/tmp/user-device.sock"}'
+```
+
+---
+
+## Add Generic vhost-user Device
+
+Hot-add a generic vhost-user device with a custom virtio device ID.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.add-generic-vhost-user` |
+| **Prerequisites** | VM is booted |
+| **Response** | `200 OK` with `PciDeviceInfo`; `204` for cold-add; `500` on failure |
+
+<ParamField path="socket" type="string" required>
+  Path to the vhost-user backend UNIX socket.
+</ParamField>
+
+<ParamField path="virtio_id" type="integer" required>
+  Virtio device ID identifying the device class.
+</ParamField>
+
+<ParamField path="queue_sizes" type="array" required>
+  List of queue sizes (one entry per virtio queue).
+</ParamField>
+
+<ParamField path="pci_segment" type="integer">
+  PCI segment to assign the device to.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.add-generic-vhost-user' \
+     -H 'Content-Type: application/json' \
+     -d '{"socket": "/tmp/vhost.sock", "virtio_id": 42, "queue_sizes": [256, 256]}'
+```
+
+---
+
+## Remove Device
+
+Remove a device from the VM by its logical identifier.
+
+| | |
+| --- | --- |
+| **Method** | `PUT` |
+| **Path** | `/api/v1/vm.remove-device` |
+| **Prerequisites** | VM is booted |
+| **Response** | `204 No Content`; `404` if device not found |
+
+<ParamField path="id" type="string">
+  Logical identifier of the device to remove. This is the `id` field set when the device was added.
+</ParamField>
+
+```bash
+curl --unix-socket /tmp/cloud-hypervisor.sock \
+     -X PUT 'http://localhost/api/v1/vm.remove-device' \
+     -H 'Content-Type: application/json' \
+     -d '{"id": "data-disk"}'
+```
+
+<Note>
+Devices that were created without an explicit `id` cannot be removed via this endpoint. Always set an `id` when adding devices that you may want to remove later.
+</Note>

@@ -1,0 +1,300 @@
+---
+title: "Storage Configuration"
+description: "Configure virtio-block disk devices, vhost-user-blk with SPDK offload, and virtio-pmem persistent memory devices for Cloud Hypervisor VMs."
+---
+
+Cloud Hypervisor provides two storage primitives: the `--disk` flag for virtio-block devices (including vhost-user-blk offload), and the `--pmem` flag for persistent memory (virtio-pmem) devices.
+
+## Disk devices (`--disk`)
+
+The `--disk` flag attaches a virtio-block device to the VM. Multiple `--disk` flags add multiple block devices. Supports direct I/O, read-only mode, IOMMU attachment, multi-queue, and offloading to an external vhost-user-blk backend (e.g. SPDK).
+
+### DiskConfig struct
+
+```rust
+pub struct DiskConfig {
+    pub path: Option<PathBuf>,
+    pub readonly: bool,
+    pub direct: bool,
+    pub iommu: bool,
+    pub num_queues: usize,      // default: 1
+    pub queue_size: u16,        // default: 128
+    pub vhost_user: bool,
+    pub vhost_socket: Option<String>,
+    pub rate_limit_group: Option<String>,
+    pub rate_limiter_config: Option<RateLimiterConfig>,
+    pub id: Option<String>,
+    pub pci_segment: u16,
+    pub serial: Option<String>,
+    pub queue_affinity: Option<Vec<VirtQueueAffinity>>,
+    pub sparse: bool,           // default: true
+    pub image_type: ImageType,
+    pub lock_granularity: LockGranularityChoice,
+}
+```
+
+### CLI syntax
+
+```
+--disk path=<disk_image_path>,readonly=on|off,direct=on|off,iommu=on|off,num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,vhost_user=on|off,socket=<vhost_socket_path>,id=<device_id>,pci_segment=<segment_id>
+```
+
+### Parameters
+
+<ParamField path="path" type="path">
+  Path to the disk image file on the host. Supports raw images and qcow2 images (read-only). Either `path` or `vhost_user=true,socket=<path>` must be specified.
+</ParamField>
+
+<ParamField path="readonly" type="bool" default="off">
+  Expose the block device as read-only to the guest. The guest cannot write to the disk. Useful for attaching cloud-init images or shared base images.
+</ParamField>
+
+<ParamField path="direct" type="bool" default="off">
+  Open the disk image with `O_DIRECT` to bypass the host page cache. Reduces host memory pressure for large disk operations but may decrease performance for workloads with poor I/O alignment.
+</ParamField>
+
+<ParamField path="iommu" type="bool" default="off">
+  Attach this block device to the paravirtualized IOMMU (`virtio-iommu`). Enabling IOMMU on any device activates the virtual IOMMU for the whole VM.
+</ParamField>
+
+<ParamField path="num_queues" type="usize" default="1">
+  Number of virtio queues for this block device. Multi-queue improves throughput for workloads with high I/O parallelism by allowing concurrent I/O processing across multiple host threads.
+</ParamField>
+
+<ParamField path="queue_size" type="u16" default="128">
+  Size of each virtio queue in descriptors. Larger values allow more I/O requests to be outstanding simultaneously.
+</ParamField>
+
+<ParamField path="vhost_user" type="bool" default="off">
+  Offload the block device backend to an external vhost-user-blk process (e.g. SPDK). When enabled, `socket` must also be provided. The `path` parameter is not used in vhost-user mode.
+</ParamField>
+
+<ParamField path="socket" type="path">
+  Path to the vhost-user socket created by the external block backend. Required when `vhost_user=true`.
+</ParamField>
+
+<ParamField path="id" type="string">
+  Unique identifier for this disk device. Used to reference the device in hotplug operations via `ch-remote`. If not specified, Cloud Hypervisor assigns one automatically (e.g. `_disk0`).
+</ParamField>
+
+<ParamField path="pci_segment" type="u16" default="0">
+  PCI segment number to assign this device to. Use with `--platform num_pci_segments=N` to enable additional segments.
+</ParamField>
+
+---
+
+## vhost-user-blk with SPDK
+
+For high-performance storage, Cloud Hypervisor can delegate the block I/O path to an external SPDK vhost target. The VM communicates with the backend over a Unix socket using the vhost-user protocol.
+
+<Note>
+vhost-user-blk requires shared guest memory. Use `--memory shared=on` or `hugepages=on` when enabling this backend.
+</Note>
+
+### SPDK setup
+
+<Steps>
+  <Step title="Allocate huge pages">
+    ```bash
+    # Allocate 2 GiB of 2M huge pages
+    echo 1024 | sudo tee /proc/sys/vm/nr_hugepages
+    cat /proc/meminfo | grep -i huge
+    ```
+  </Step>
+  <Step title="Start the SPDK vhost target">
+    ```bash
+    # Run with 2 CPU cores (mask 0x3), 1024M huge pages
+    sudo HUGEMEM=2048 scripts/setup.sh
+    sudo ./build/bin/vhost -S /var/tmp -s 1024 -m 0x3 &
+    ```
+  </Step>
+  <Step title="Create a block device and vhost controller">
+    ```bash
+    # Create a 512M malloc block device with 512-byte sector size
+    sudo scripts/rpc.py bdev_malloc_create 512 512 -b Malloc0
+    # Expose it via a vhost-user controller on /var/tmp/vhost.1
+    sudo scripts/rpc.py vhost_create_blk_controller --cpumask 0x1 vhost.1 Malloc0
+    ```
+  </Step>
+  <Step title="Launch the VM">
+    ```bash
+    ./cloud-hypervisor \
+      --cpus boot=4 \
+      --memory size=1024M,hugepages=on,shared=true \
+      --kernel linux/arch/x86/boot/compressed/vmlinux.bin \
+      --cmdline "console=ttyS0 root=/dev/vda1 rw iommu=off" \
+      --disk path=images/focal-server-cloudimg-amd64.raw \
+             vhost_user=true,socket=/var/tmp/vhost.1,num_queues=4,queue_size=128 \
+      --console off \
+      --serial tty
+    ```
+  </Step>
+</Steps>
+
+Inside the guest, the vhost-user-blk device appears as an additional block device:
+
+```bash
+lsblk
+# NAME    MAJ:MIN RM  SIZE RO TYPE MOUNTPOINT
+# vda     252:0    0  2.2G  0 disk
+# └─vda1  252:1    0  2.1G  0 part /
+# vdb     253:16   0  512M  0 disk   ← vhost-user-blk device
+
+# Test I/O
+dd if=/dev/vdb of=/dev/null bs=2M iflag=direct
+dd of=/dev/vdb if=/dev/zero bs=2M oflag=direct count=256
+```
+
+---
+
+## Persistent memory (`--pmem`)
+
+The `--pmem` flag attaches a `virtio-pmem` device to the VM. This exposes a file-backed persistent memory region to the guest, bypassing the guest page cache for direct access. Boot times improve when booting from a pmem device because IOMMU mappings are reduced.
+
+### PmemConfig struct
+
+```rust
+pub struct PmemConfig {
+    pub file: PathBuf,
+    pub size: Option<u64>,
+    pub iommu: bool,
+    pub discard_writes: bool,
+    pub id: Option<String>,
+    pub pci_segment: u16,
+}
+```
+
+### CLI syntax
+
+```
+--pmem file=<backing_file>,size=<size>,iommu=on|off,discard_writes=on|off,id=<device_id>,pci_segment=<segment_id>
+```
+
+### pmem parameters
+
+<ParamField path="file" type="path" required>
+  Path to the file or block device that backs the persistent memory region. The file is memory-mapped and exposed directly to the guest.
+</ParamField>
+
+<ParamField path="size" type="u64">
+  Size of the pmem region to expose. If not specified, the full size of the backing file is used.
+</ParamField>
+
+<ParamField path="iommu" type="bool" default="off">
+  Attach this pmem device to the paravirtualized IOMMU.
+</ParamField>
+
+<ParamField path="discard_writes" type="bool" default="off">
+  Make the pmem device read-only from the guest's perspective. Writes are discarded. Useful for read-only base images.
+</ParamField>
+
+<ParamField path="id" type="string">
+  Unique identifier for this pmem device. Used in hotplug operations.
+</ParamField>
+
+<ParamField path="pci_segment" type="u16" default="0">
+  PCI segment number for this device.
+</ParamField>
+
+### pmem examples
+
+```bash
+# Attach a pmem region from a file
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --memory size=512M \
+  --pmem file=/mnt/pmem0/image.raw,size=512M
+
+# Boot from a pmem device (bypasses guest page cache)
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --memory size=1G \
+  --pmem file=focal-server-cloudimg-amd64.raw \
+  --cmdline "root=/dev/pmem0p1 rw"
+
+# Read-only pmem (writes discarded)
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --memory size=1G \
+  --pmem file=base-image.raw,discard_writes=on
+```
+
+---
+
+## Storage device hotplug
+
+Disk and pmem devices can be added to a running VM via the API:
+
+```bash
+# Start VM with API socket
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=1G \
+  --api-socket=/tmp/ch-socket
+
+# Add a disk at runtime
+./ch-remote --api-socket=/tmp/ch-socket add-disk path=/path/to/data.img
+
+# Remove a disk (using the device id)
+./ch-remote --api-socket=/tmp/ch-socket remove-device _disk1
+```
+
+---
+
+## Examples
+
+<CodeGroup>
+
+```bash Boot disk (firmware mode)
+./cloud-hypervisor \
+  --firmware ./hypervisor-fw \
+  --disk path=focal-server-cloudimg-amd64.raw \
+  --cpus boot=4 \
+  --memory size=1024M \
+  --net "tap=,mac=,ip=,mask="
+```
+
+```bash Boot disk + cloud-init disk
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal-server-cloudimg-amd64.raw \
+         path=/tmp/ubuntu-cloudinit.img \
+  --cpus boot=4 \
+  --memory size=1024M \
+  --net "tap=,mac=,ip=,mask="
+```
+
+```bash Read-only disk
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=base-image.raw,readonly=on \
+  --memory size=1G
+```
+
+```bash Direct I/O (bypass host page cache)
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=data.raw,direct=on,num_queues=4 \
+  --cpus boot=4 \
+  --memory size=4G
+```
+
+```bash vhost-user-blk (SPDK backend)
+./cloud-hypervisor \
+  --cpus boot=4 \
+  --memory size=1G,hugepages=on,shared=true \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+         vhost_user=true,socket=/var/tmp/vhost.1,num_queues=4,queue_size=128
+```
+
+```bash virtio-pmem boot
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --memory size=1G \
+  --pmem file=focal-server-cloudimg-amd64.raw \
+  --cmdline "root=/dev/pmem0p1 rw"
+```
+
+</CodeGroup>

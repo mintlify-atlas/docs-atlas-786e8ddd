@@ -1,0 +1,174 @@
+---
+title: "VFIO Device Passthrough"
+description: "Assign host PCI devices directly to Cloud Hypervisor guests using the VFIO kernel framework for bare-metal device performance inside VMs."
+---
+
+VFIO (Virtual Function I/O) is a Linux kernel framework that exposes direct device access to userspace processes. Cloud Hypervisor uses VFIO to assign host physical PCI devices — such as GPUs, network cards, and storage controllers — directly into guest workloads. The guest accesses the device at near-native performance with full isolation enforced by the IOMMU.
+
+Cloud Hypervisor only supports assigning **PCI devices** via VFIO. VFIO support is built in by default (via the `pci` feature) and activated with the `--device` flag.
+
+<Note>
+  Before a device can be passed through, it must be unbound from its native kernel driver and bound to the `vfio-pci` driver instead. The native driver and the VFIO driver cannot manage the same device simultaneously.
+</Note>
+
+---
+
+## Passthrough Workflow
+
+The following example assigns a Realtek PCI Express Card Reader to a Cloud Hypervisor guest.
+
+<Steps>
+  <Step title="Identify the PCI device">
+    Use `lspci` to find the device's bus, slot, and function address:
+
+    ```shell
+    lspci
+    # [...]
+    # 01:00.0 Unassigned class [ff00]: Realtek Semiconductor Co., Ltd. RTS525A PCI Express Card Reader (rev 01)
+    # [...]
+    ```
+
+    The address `01:00.0` means bus 1, slot 0, function 0.
+  </Step>
+
+  <Step title="Load VFIO kernel modules">
+    Load the VFIO drivers on the host. If unsafe interrupt remapping is required (common when the host lacks full IOMMU interrupt remapping support):
+
+    ```shell
+    modprobe -r vfio_pci
+    modprobe -r vfio_iommu_type1
+    modprobe vfio_iommu_type1 allow_unsafe_interrupts
+    modprobe vfio_pci
+    ```
+
+    If the VFIO drivers are compiled into the kernel (built-in), enable unsafe interrupts directly:
+
+    ```shell
+    echo 1 > /sys/module/vfio_iommu_type1/parameters/allow_unsafe_interrupts
+    ```
+  </Step>
+
+  <Step title="Unbind the device from its native driver">
+    Write the device's PCI address to the driver's `unbind` file:
+
+    ```shell
+    echo 0000:01:00.0 > /sys/bus/pci/devices/0000\:01\:00.0/driver/unbind
+    ```
+  </Step>
+
+  <Step title="Bind the device to the vfio-pci driver">
+    Get the device's Vendor ID (VID) and Product ID (PID):
+
+    ```shell
+    lspci -n -s 01:00.0
+    # 01:00.0 ff00: 10ec:525a (rev 01)
+    ```
+
+    Bind the device using its VID and PID:
+
+    ```shell
+    echo 10ec 525a > /sys/bus/pci/drivers/vfio-pci/new_id
+    ```
+
+    If you have multiple devices with the same VID/PID, bind subsequent devices by address:
+
+    ```shell
+    echo 0000:02:00.0 > /sys/bus/pci/drivers/vfio-pci/bind
+    ```
+
+    The device is now managed by the VFIO framework.
+  </Step>
+
+  <Step title="Pass the device to Cloud Hypervisor">
+    Use the `--device` flag with the device's sysfs path:
+
+    ```shell
+    ./cloud-hypervisor \
+        --kernel ~/vmlinux \
+        --disk path=~/focal-server-cloudimg-amd64.raw \
+        --console off \
+        --serial tty \
+        --cmdline "console=ttyS0 root=/dev/vda1 rw" \
+        --cpus 4 \
+        --memory size=512M \
+        --device path=/sys/bus/pci/devices/0000:01:00.0/
+    ```
+
+    The guest kernel detects the device on its PCI bus and, if the required driver is available, probes and enables it.
+  </Step>
+</Steps>
+
+---
+
+## Passing Multiple Devices
+
+To pass more than one device, provide multiple `path=` arguments to the `--device` flag:
+
+```shell
+--device path=/sys/bus/pci/devices/0000:01:00.0/ path=/sys/bus/pci/devices/0000:02:00.0/
+```
+
+### Devices in the Same IOMMU Group
+
+Devices within the same IOMMU group must **all** be passed through together. The IOMMU prevents partial assignment from a group, as it would create security and functional issues.
+
+A common example is a GPU with an integrated audio controller:
+
+```shell
+lspci
+# 01:00.0 VGA compatible controller: NVIDIA Corporation GK208B [GeForce GT 710] (rev a1)
+# 01:00.1 Audio device: NVIDIA Corporation GK208 HDMI/DP Audio Controller (rev a1)
+```
+
+Check their IOMMU group:
+
+```shell
+ls /sys/kernel/iommu_groups/22/devices/
+# 0000:01:00.0  0000:01:00.1
+```
+
+Both devices are in IOMMU group 22. Both must be bound to `vfio-pci` and passed through with `--device`.
+
+---
+
+## Hotplug of VFIO Devices
+
+VFIO devices can also be added to a running VM via the API (the VM must have been started with `--api-socket`):
+
+```shell
+./ch-remote --api-socket=/tmp/ch-socket add-device path=/sys/bus/pci/devices/0000:01:00.0/
+```
+
+See [Hotplug — Add VFIO Device](/features/hotplug#add-vfio-device) for the full hotplug workflow.
+
+---
+
+## Advanced: NVIDIA GPUDirect P2P (PCIe Peer-to-Peer)
+
+For NVIDIA GPU passthrough on Turing, Ampere, Hopper, and Lovelace GPUs, Cloud Hypervisor supports enabling GPUDirect P2P DMA over PCIe. This allows GPU-to-GPU loads and stores to use native PCIe peer-to-peer transactions, dramatically reducing P2P latency compared to a shared memory buffer.
+
+Use the `x_nv_gpudirect_clique` parameter to assign devices to a clique. The driver assumes P2P is supported between all devices in the same clique:
+
+```shell
+--device path=/sys/bus/pci/devices/0000:01:00.0/,x_nv_gpudirect_clique=0
+```
+
+Verify on the guest:
+
+```shell
+nvidia-smi topo -p2p r
+```
+
+---
+
+## Advanced: 32-bit MMIO Aperture Tuning
+
+Some VFIO devices have a 32-bit MMIO BAR. When using many such devices, the 32-bit MMIO address space on a PCI segment may be exhausted. By default, this space is equally split across all PCI segments.
+
+Use `--pci-segment` to redistribute the allocation. The following example gives PCI segment 0 twice the 32-bit MMIO space of segment 1:
+
+```shell
+--platform num_pci_segments=2
+--pci-segment pci_segment=0,mmio32_aperture_weight=2
+--pci-segment pci_segment=1,mmio32_aperture_weight=1
+```

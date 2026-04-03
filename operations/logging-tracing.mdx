@@ -1,0 +1,105 @@
+---
+title: "Logging & Tracing"
+description: "Configure log verbosity, redirect log output, and use the tracing infrastructure to profile Cloud Hypervisor boot and initialization."
+---
+
+Cloud Hypervisor provides structured logging at multiple verbosity levels and a compile-time tracing infrastructure for profiling the VM initialization sequence.
+
+## Logging
+
+### Log levels
+
+Cloud Hypervisor uses four log levels. By default, messages at `warn` and above are emitted.
+
+| Level | Flag | When to use |
+|-------|------|-------------|
+| `error` | (always on) | Immediate, unrecoverable failures. The VM cannot continue and Cloud Hypervisor will exit with a non-zero code shortly after. Typical causes: conflicting CLI options, missing files. |
+| `warn` | (always on) | A serious problem occurred but the VM can continue running, possibly with reduced functionality. Typical cause: an API request that could not be fulfilled. |
+| `info` | `-v` | Sporadic, infrequent informational messages useful to developers. The VM remains fully usable at this level. Messages should not repeat in tight loops. |
+| `debug` | `-vv` | Highly verbose output. Repeated invocations of the same message are acceptable. Use with `--log-file` to avoid interleaving with VM console output. |
+
+### Controlling log output
+
+Pass `-v` or `-vv` to increase verbosity:
+
+```bash
+# info level
+cloud-hypervisor -v [options]
+
+# debug level
+cloud-hypervisor -vv [options]
+```
+
+By default, log output goes to `stderr`. Use `--log-file` to write logs to a file instead:
+
+```bash
+cloud-hypervisor -vv --log-file /tmp/ch.log [options]
+```
+
+<Tip>
+At `debug` level (`-vv`), log volume can be high enough to interfere with `stdin`/`stdout` if both share the terminal. Redirect to a file with `--log-file` when running at this verbosity.
+</Tip>
+
+### Reading log output
+
+`error` messages indicate a configuration or startup problem. Check your VM configuration — conflicting options and missing files are the most common causes.
+
+`warn` messages during operation often indicate API calls that could not be fulfilled. Review the message text to determine whether the VM is behaving as expected.
+
+---
+
+## Tracing
+
+Cloud Hypervisor includes a lightweight tracing infrastructure focused on the VM initialization and boot sequence. Tracing is compiled out by default and must be explicitly enabled at build time.
+
+### Building with tracing enabled
+
+```bash
+cargo build --features "tracing"
+```
+
+### Running and collecting a trace
+
+Run Cloud Hypervisor as normal after building with tracing enabled. A trace file is written to the current working directory:
+
+```
+cloud-hypervisor-<pid>.trace
+```
+
+The trace file is a JSON document you can inspect directly or visualize with the provided script.
+
+### Visualizing traces
+
+Use the `ch-trace-visualiser.py` script to convert a trace into an SVG:
+
+```bash
+scripts/ch-trace-visualiser.py cloud-hypervisor-39466.trace output.svg
+```
+
+Open `output.svg` in a browser to see a timeline of the initialization sequence.
+
+### Adding tracepoints
+
+The codebase includes existing tracepoints. You can add more for narrower investigation.
+
+**Scoped tracepoint** — records the duration of the enclosing scope as a block in the trace:
+
+```rust
+tracer::trace_scoped!("my_scope_name");
+```
+
+**Instantaneous tracepoint** — records a single moment in time:
+
+```rust
+tracer::trace_point!("my_event");
+```
+
+<Note>
+`trace_point!` is not currently used in the codebase and is not handled by the visualisation script, as instantaneous events are difficult to represent in SVG form.
+</Note>
+
+**Relocating start/end markers** — `tracer::start()` and `tracer::end()` define the region of code that is traced. Move these calls to focus tracing on a specific subsystem rather than the entire boot sequence.
+
+<Tip>
+Tracing is most useful for diagnosing slow VM startup. The SVG visualization makes it straightforward to spot which initialization phase is taking the most time.
+</Tip>

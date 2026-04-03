@@ -1,0 +1,90 @@
+---
+title: "Seccomp Filtering"
+description: "How Cloud Hypervisor uses seccomp to restrict system calls and harden the VMM against exploitation."
+---
+
+Seccomp filtering is a Linux kernel mechanism that lets a process declare which system calls it is allowed to make. Any attempt to invoke a prohibited syscall causes the kernel to kill the process immediately. Cloud Hypervisor uses seccomp filtering as a core security control to reduce its attack surface.
+
+## How it works in Cloud Hypervisor
+
+Cloud Hypervisor is a multi-threaded application. It spawns dedicated threads for:
+
+- **vCPUs** — one thread per virtual CPU
+- **virtio devices** — threads for virtio device emulation
+- **HTTP API server** — the REST API listener thread
+- **VMM main thread** — the hypervisor control loop
+
+Each thread has a narrow, well-defined scope of operations. Cloud Hypervisor applies a distinct seccomp filter to each thread type, allowing only the system calls that thread legitimately needs. This means a compromised virtio thread, for example, cannot make syscalls that only the VMM main thread should be making.
+
+<Note>
+Seccomp filtering is enabled by default. Cloud Hypervisor treats security as a first-class requirement, not an optional feature.
+</Note>
+
+## Disabling seccomp filtering
+
+You can disable seccomp filtering entirely for development or debugging purposes:
+
+```bash
+cloud-hypervisor --seccomp false [other options]
+```
+
+<Warning>
+Disabling seccomp removes an important security boundary. Only do this in controlled development environments, never in production.
+</Warning>
+
+## Logging mode
+
+Instead of killing the process on a prohibited syscall, logging mode records the violation to the system audit log and allows execution to continue. This is useful when developing new functionality that might require additional syscalls.
+
+```bash
+cloud-hypervisor --seccomp log [other options]
+```
+
+<Note>
+The host kernel must have audit support enabled. If audit is not active, add `audit=1` to your kernel boot parameters.
+</Note>
+
+Violations appear in the system journal in a format like:
+
+```
+type=SECCOMP msg=audit(1423263412.694:7878): auid=1000 uid=1000 gid=1000 ses=3 subj=unconfined_u:unconfined_r:cloud_hypervisor:s0-s0:c0.c1023 pid=1193 comm="cloud-hypervisor" exe="/usr/bin/cloud-hypervisor" sig=0 arch=c000003e syscall=47 compat=0 ip=0x7f4f63982604 code=0x50000
+```
+
+To identify the syscall by number, use `ausyscall` (part of the `audit` package):
+
+```bash
+ausyscall 47
+```
+
+```
+recvmsg
+```
+
+## Debugging with strace
+
+For deeper investigation, `strace` can log every syscall made by the process and all its threads. The `-f` flag is required to trace child threads:
+
+```bash
+strace --decode-pids=comm -f ./cloud-hypervisor [options]
+```
+
+This is useful for identifying which syscalls a particular code path requires before adding them to a filter.
+
+## Development workflow
+
+When adding a new feature that requires additional syscalls, the recommended workflow is:
+
+<Steps>
+  <Step title="Enable logging mode">
+    Run Cloud Hypervisor with `--seccomp log` and exercise the new code path.
+  </Step>
+  <Step title="Check the audit log">
+    Inspect the system journal for `SECCOMP` entries. Use `ausyscall` to translate syscall numbers to names.
+  </Step>
+  <Step title="Update the filter">
+    Add the required syscalls to the appropriate thread filter in the Cloud Hypervisor source.
+  </Step>
+  <Step title="Verify with seccomp enabled">
+    Re-run with the default `--seccomp` settings to confirm the filter is correct and no violations occur.
+  </Step>
+</Steps>

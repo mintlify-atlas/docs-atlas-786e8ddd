@@ -1,0 +1,296 @@
+---
+title: "Windows Guest Support"
+description: "Run Windows Server and Windows 11 guests on Cloud Hypervisor using UEFI firmware and VirtIO drivers, including image preparation, configuration, and networking."
+---
+
+Cloud Hypervisor supports Windows guests starting from release v0.10.0. Windows is run using UEFI firmware — BIOS boot is not supported. VirtIO drivers must be integrated into the guest image for storage, network, and other devices to function correctly.
+
+## Supported Versions
+
+<CardGroup cols={2}>
+  <Card title="Windows Server 2019">
+    Fully supported. Use the standard server installation ISO with VirtIO drivers.
+  </Card>
+  <Card title="Windows Server Core 2004">
+    Fully supported. Use the standard server installation ISO with VirtIO drivers.
+  </Card>
+  <Card title="Windows 11 IoT Enterprise LTSC 2024">
+    Supported. Requires TPM 2.0 for installation (can be omitted for running the installed image). Requires 2 or more vCPUs.
+  </Card>
+  <Card title="Other modern Windows Server versions">
+    Compatible in general. Testing has focused on the versions listed above.
+  </Card>
+</CardGroup>
+
+## Requirements
+
+- Host with KVM enabled
+- UEFI firmware for Cloud Hypervisor: `CLOUDHV.fd`
+- UEFI firmware for QEMU (image preparation only): `OVMF_CODE.fd` / `OVMF.fd`
+- [VirtIO driver ISO](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/)
+- QEMU ≥ 5.0.0 (for initial image preparation only)
+- Windows installation ISO (MSDN, Visual Studio subscription, or evaluation center)
+- For Windows 11: `swtpm` for TPM 2.0 emulation during installation; attestation drivers from the [VirtIO Windows 11 attestation file](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/upstream-virtio/virtio-win11-attestation-0.1-258.zip)
+
+<Note>
+  QEMU is only required during the initial image preparation phase. Once the image is prepared and VirtIO drivers are installed, it runs entirely under Cloud Hypervisor.
+</Note>
+
+---
+
+## Image Preparation
+
+Windows installation is performed under QEMU because it requires a VGA adapter and a two-stage setup (install, then configure drivers). The resulting image is fully compatible with Cloud Hypervisor.
+
+<Steps>
+  <Step title="Set variables and create a disk image">
+    Set up file references and create an empty raw disk image:
+
+    ```shell
+    IMG_FILE=windows-disk.raw
+    WIN_ISO_FILE=en_windows_server_version_2004_updated_may_2020_x64_dvd_1e7f1cfa.iso
+    VIRTIO_ISO_FILE=virtio-win-0.1.185.iso
+    OVMF_DIR=./FV
+    ```
+
+    ```shell
+    qemu-img create -f raw $IMG_FILE 30G
+    ```
+
+    <Note>
+      For Windows 11, increase the image size to at least 64 GB to meet the OS minimum requirements.
+    </Note>
+  </Step>
+
+  <Step title="Install Windows under QEMU">
+    <Tabs>
+      <Tab title="Windows Server">
+        ```shell
+        qemu-system-x86_64 \
+            -machine q35,accel=kvm \
+            -cpu host \
+            -m 4G \
+            -bios ./$OVMF_DIR/OVMF_CODE.fd \
+            -cdrom ./$WIN_ISO_FILE \
+            -drive file=./$VIRTIO_ISO_FILE,index=0,media=cdrom \
+            -drive if=none,id=root,file=./$IMG_FILE \
+            -device virtio-blk-pci,drive=root,disable-legacy=on \
+            -device virtio-net-pci,netdev=mynet0,disable-legacy=on \
+            -netdev user,id=mynet0 \
+            -vga std
+        ```
+      </Tab>
+      <Tab title="Windows 11">
+        Windows 11 requires TPM 2.0. Start the `swtpm` daemon before launching QEMU:
+
+        ```shell
+        # Create TPM state directory
+        mkdir -p /tmp/mytpm1
+
+        # Start swtpm for TPM 2.0 support
+        swtpm socket \
+            --tpm2 \
+            --ctrl type=unixio,path=/tmp/swtpm-sock \
+            --tpmstate dir=/tmp/mytpm1 \
+            --flags startup-clear \
+            --log level=20 \
+            --log file=/tmp/swtpm.log \
+            --daemon
+        ```
+
+        Then install Windows 11:
+
+        ```shell
+        qemu-system-x86_64 \
+            -machine q35,accel=kvm \
+            -cpu host \
+            -m 4G \
+            -bios ./$OVMF_DIR/OVMF.fd \
+            -cdrom ./$WIN_ISO_FILE \
+            -drive file=./$VIRTIO_ISO_FILE,index=0,media=cdrom \
+            -drive if=none,id=root,file=./$IMG_FILE \
+            -device virtio-blk-pci,drive=root,disable-legacy=on \
+            -device virtio-net-pci,netdev=mynet0,disable-legacy=on \
+            -netdev user,id=mynet0 \
+            -vga std \
+            -smp 4 \
+            -chardev socket,id=chrtpm,path=/tmp/swtpm-sock \
+            -tpmdev emulator,id=tpm0,chardev=chrtpm \
+            -device tpm-tis,tpmdev=tpm0
+        ```
+
+        <Warning>
+          Use `OVMF.fd` for Windows 11 — using `OVMF_CODE.fd` causes a QEMU error. Windows 11 requires at least `-smp 2` (2 cores).
+        </Warning>
+
+        <Note>
+          When installing Windows 11, do not install network drivers during setup if you want to skip the Microsoft account requirement. Select "I don't have internet" at the network screen.
+        </Note>
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Install VirtIO storage drivers during setup">
+    During the Windows installation wizard, when prompted to choose an installation disk, the VirtIO disk will not be visible until the storage controller driver is loaded:
+
+    1. Click **Load driver**.
+    2. Browse to the VirtIO ISO (second CD-ROM drive).
+    3. Navigate to the `viostor` directory (for Windows 11 attestation drivers, navigate specifically to the `viostor` folder).
+    4. Install the driver.
+    5. The disk will now be visible — proceed with installation.
+  </Step>
+
+  <Step title="Install remaining VirtIO drivers after installation">
+    After the initial installation completes, boot into QEMU again to install the remaining device drivers (especially the network driver, which is needed for subsequent steps):
+
+    1. Open **Device Manager**.
+    2. Look for devices with missing drivers (typically the network adapter).
+    3. Right-click the unknown network device → **Update driver** → browse to the `NetKvm` directory on the VirtIO ISO CD.
+
+    Ensure all devices have drivers before proceeding.
+  </Step>
+</Steps>
+
+---
+
+## Running Windows with Cloud Hypervisor
+
+Once the image is prepared and drivers are installed, boot it with Cloud Hypervisor using the `CLOUDHV.fd` UEFI firmware:
+
+```shell
+cloud-hypervisor \
+    --kernel ./$OVMF_DIR/CLOUDHV.fd \
+    --disk path=./$IMG_FILE \
+    --cpus boot=1,kvm_hyperv=on \
+    --memory size=4G \
+    --serial tty \
+    --console off \
+    --net tap=
+```
+
+<Warning>
+  Two options are always required for Windows guests:
+  - Pass `CLOUDHV.fd` via `--kernel` (not a Linux kernel binary).
+  - Include `kvm_hyperv=on` in `--cpus` to enable Hyper-V enlightenments.
+</Warning>
+
+<Note>
+  If the host processor supports an address space larger than 39 bits, you may need to limit it: append `max_phys_bits=39` (or another value ≥ 39) to `--cpus`. Windows has been tested to support at least 39-bit address space.
+</Note>
+
+---
+
+## Console Access (SAC)
+
+Cloud Hypervisor does not implement a VGA adapter, so the Windows Special Administration Console (SAC) is the primary management interface for Windows Server guests.
+
+<Steps>
+  <Step title="Enable SAC (run in the guest under QEMU)">
+    Boot the image under QEMU and run the following commands as Administrator:
+
+    ```cmd
+    bcdedit /emssettings emsport:1 emsbaudrate:115200
+    bcdedit /ems on
+    bcdedit /bootems on
+    ```
+  </Step>
+
+  <Step title="Access the SAC prompt under Cloud Hypervisor">
+    Once SAC is enabled and the VM is running under Cloud Hypervisor, the SAC prompt appears on the serial console:
+
+    ```
+    Computer is booting, SAC started and initialized.
+
+    Use the "ch -?" command for information about using channels.
+    SAC>
+    ```
+  </Step>
+
+  <Step title="Open a command prompt session">
+    From the SAC prompt:
+
+    ```
+    SAC> cmd
+    The Command Prompt session was successfully launched.
+    SAC>
+    EVENT:   A new channel has been created.  Use "ch -?" for channel help.
+    Channel: Cmd0001
+    SAC> ch -si 1
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Networking
+
+### Basic Networking
+
+Using `--net tap=` creates a `vmtapX` TAP device on the host with default IPv4 `192.168.249.1`. Configure the guest IP from the SAC prompt:
+
+```
+SAC> i 10 192.168.249.2 255.255.255.0 192.168.249.1
+```
+
+Where `10` is the device index shown by the `i` command.
+
+### Internet Access
+
+```shell
+NET_DEV=wlp3s0   # replace with your host network interface
+sysctl -w net.ipv4.ip_forward=1
+iptables -t nat -A POSTROUTING -o $NET_DEV -j MASQUERADE
+```
+
+Also add a DNS server on the guest via `netsh` or Network and Connectivity Center.
+
+### Enable RDP
+
+```powershell
+Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\" -Name "fDenyTSConnections" -Value 0
+Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+Add-LocalGroupMember -Group "Remote Desktop Users" -Member someuser
+```
+
+Connect with any RDP client to `192.168.249.2`.
+
+### Enable SSH
+
+```powershell
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Start-Service sshd
+Set-Service -Name sshd -StartupType 'Automatic'
+```
+
+On Windows 11, also open the firewall:
+
+```powershell
+New-NetFirewallRule -Name sshd -DisplayName "OpenSSH Server" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22
+```
+
+---
+
+## Hotplug Support
+
+| Feature | Supported | Notes |
+|---|---|---|
+| CPU hotplug | Yes | Windows must be licensed for the additional cores. Hot-remove is not supported — reducing vCPUs via `ch-remote` takes effect after the next OS reboot. |
+| RAM hotplug | Yes | Hot-remove requires that the RAM being removed is not in use and has no reserved pages. In practice, hot-remove rarely succeeds. Changes take effect after reboot. |
+| Network hotplug/hot-remove | Yes | Fully supported. |
+| Disk hotplug/hot-remove | Yes | After hotplug, the disk must be onlined from within the guest using `Get-Disk` / `Set-Disk` PowerShell applets or Disk Management. |
+
+---
+
+## Windows 11 and TPM 2.0
+
+TPM 2.0 is required to install Windows 11, but running the already-installed image under Cloud Hypervisor without TPM is a valid option. Running a Windows 11 VM with TPM 2.0 emulation under Cloud Hypervisor has not been confirmed to work reliably at this time.
+
+---
+
+## Links
+
+- [Fedora VirtIO guide for Windows](https://docs.fedoraproject.org/en-US/quick-docs/creating-windows-virtual-machines-using-virtio-drivers/)
+- [VirtIO driver binaries](https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/)
+- [VirtIO driver sources (GitHub)](https://github.com/virtio-win/kvm-guest-drivers-windows)
+- [Windows Emergency Management Services (SAC)](https://docs.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2003/cc787940(v=ws.10))
+- [OpenSSH server/client configuration](https://docs.microsoft.com/en-us/windows-server/administration/openssh/openssh_install_firstuse)

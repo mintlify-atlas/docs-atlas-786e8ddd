@@ -1,0 +1,297 @@
+---
+title: "Memory Configuration"
+description: "Configure guest RAM size, hotplug methods, huge pages, memory zones, and NUMA topology for Cloud Hypervisor VMs."
+---
+
+Cloud Hypervisor provides two levels of memory configuration: the basic `--memory` flag for common use cases, and the advanced `--memory-zone` flag for fine-grained control over how each memory region is backed and exposed to the guest.
+
+## MemoryConfig struct
+
+```rust
+struct MemoryConfig {
+    size: u64,
+    mergeable: bool,
+    hotplug_method: HotplugMethod,
+    hotplug_size: Option<u64>,
+    hotplugged_size: Option<u64>,
+    shared: bool,
+    hugepages: bool,
+    hugepage_size: Option<u64>,
+    prefault: bool,
+    thp: bool,
+    zones: Option<Vec<MemoryZoneConfig>>,
+}
+```
+
+## CLI syntax
+
+```
+--memory size=<guest_memory_size>,mergeable=on|off,shared=on|off,hugepages=on|off,hugepage_size=<hugepage_size>,hotplug_method=acpi|virtio-mem,hotplug_size=<hotpluggable_memory_size>,hotplugged_size=<hotplugged_memory_size>,prefault=on|off,thp=on|off
+```
+
+Default: `size=512M,thp=on`
+
+## Parameters
+
+<ParamField path="size" type="u64" required>
+  Size of the RAM in the guest VM. Accepts size suffixes: `K`, `M`, `G`. This option is mandatory when using `--memory`.
+</ParamField>
+
+<ParamField path="mergeable" type="bool" default="off">
+  Mark guest RAM pages as mergeable using `madvise(2)`, making them eligible for the host KSM (Kernel Samepage Merging) daemon. Useful for increasing VM density on a single host by reducing memory consumed per VM.
+</ParamField>
+
+<ParamField path="hotplug_method" type="string" default="acpi">
+  Selects the mechanism for dynamically adding or removing memory from a running VM.
+
+  - `acpi`: Standard ACPI memory hotplug. Memory can be added but not removed after extension.
+  - `virtio-mem`: virtio-based memory hotplug. Supports both adding and removing memory at runtime.
+</ParamField>
+
+<ParamField path="hotplug_size" type="u64">
+  Amount of guest physical address space reserved for hotpluggable memory. Must be set to enable memory hotplug. A value of `0` is invalid. Recommended to be larger than the expected hotplug amount due to alignment requirements.
+</ParamField>
+
+<ParamField path="hotplugged_size" type="u64">
+  Amount of memory to dynamically add at VM boot. Only valid with `hotplug_method=virtio-mem` and when `hotplug_size` is also specified. Its value cannot exceed `hotplug_size`. Allows starting a VM with memory that can later be reduced at runtime.
+</ParamField>
+
+<ParamField path="shared" type="bool" default="off">
+  Map guest RAM with `MAP_SHARED` instead of `MAP_PRIVATE`. Required when using vhost-user devices, as the external daemon processes need access to the guest RAM content. If `hugepages=on`, this field is ignored — huge pages always require `MAP_SHARED`.
+</ParamField>
+
+<ParamField path="hugepages" type="bool" default="off">
+  Map guest RAM using `MAP_HUGETLB`. Improves VM performance by reducing TLB pressure when the guest also uses huge pages. Also speeds up VFIO boot time by reducing the number of IOMMU mappings. Implies `MAP_SHARED`. Ensure sufficient huge pages are available on the host before enabling.
+</ParamField>
+
+<ParamField path="hugepage_size" type="u64">
+  Size of huge pages to use when `hugepages=on`. If not specified, the system default huge page size is used (typically 2M on x86-64).
+</ParamField>
+
+<ParamField path="prefault" type="bool" default="off">
+  Map guest RAM with `MAP_POPULATE` to allocate all physical memory and build page tables upfront at `mmap` time. Reduces page faults during VM execution at the cost of slower boot and immediate consumption of the full memory allocation.
+</ParamField>
+
+<ParamField path="thp" type="bool" default="on">
+  Label private anonymous guest memory with `MADV_HUGEPAGE`, allowing the kernel to back it with transparent huge pages automatically. Reduces virtualization-related page faults without requiring a fixed huge page reservation. Only applies when `shared=off` and no backing file is used.
+</ParamField>
+
+---
+
+## Memory hotplug
+
+<Tabs>
+  <Tab title="ACPI (default)">
+    ACPI hotplug is the default method. Memory can be added but cannot be shrunk after it has been extended.
+
+    <Steps>
+      <Step title="Start the VM with hotplug capacity">
+        ```bash
+        ./cloud-hypervisor \
+          --kernel custom-vmlinux.bin \
+          --cmdline "console=ttyS0 console=hvc0 root=/dev/vda1 rw" \
+          --disk path=focal-server-cloudimg-amd64.raw \
+          --memory size=1024M,hotplug_size=8192M \
+          --api-socket=/tmp/ch-socket
+        ```
+      </Step>
+      <Step title="Enable auto-online inside the guest">
+        ```bash
+        echo online | sudo tee /sys/devices/system/memory/auto_online_blocks
+        ```
+      </Step>
+      <Step title="Expand RAM via the API">
+        ```bash
+        ./ch-remote --api-socket=/tmp/ch-socket resize --memory 3G
+        ```
+      </Step>
+    </Steps>
+
+    <Note>
+      The amount of memory added must be a multiple of 128 MiB due to guest OS limitations.
+    </Note>
+  </Tab>
+  <Tab title="virtio-mem">
+    The `virtio-mem` method supports both expanding and shrinking memory at runtime.
+
+    <Steps>
+      <Step title="Start the VM with virtio-mem hotplug">
+        ```bash
+        ./cloud-hypervisor \
+          --kernel custom-vmlinux.bin \
+          --cmdline "console=ttyS0 console=hvc0 root=/dev/vda1 rw" \
+          --disk path=focal-server-cloudimg-amd64.raw \
+          --memory size=1024M,hotplug_size=8192M,hotplug_method=virtio-mem \
+          --api-socket=/tmp/ch-socket
+        ```
+      </Step>
+      <Step title="Expand memory">
+        ```bash
+        ./ch-remote --api-socket=/tmp/ch-socket resize --memory 3G
+        ```
+      </Step>
+      <Step title="Reduce memory">
+        ```bash
+        ./ch-remote --api-socket=/tmp/ch-socket resize --memory 2G
+        ```
+        Note that reducing RAM may only partially succeed if the guest is using some of the memory being removed.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+---
+
+## Memory zones (advanced)
+
+`--memory-zone` provides full control over individual guest memory regions. Each zone can have its own backing file, NUMA placement, huge page settings, and hotplug capacity. To use memory zones, set `--memory size=0` to indicate that all memory is described through zones.
+
+### MemoryZoneConfig struct
+
+```rust
+struct MemoryZoneConfig {
+    id: String,
+    size: u64,
+    file: Option<PathBuf>,
+    shared: bool,
+    hugepages: bool,
+    hugepage_size: Option<u64>,
+    host_numa_node: Option<u32>,
+    hotplug_size: Option<u64>,
+    hotplugged_size: Option<u64>,
+    prefault: bool,
+}
+```
+
+### CLI syntax
+
+```
+--memory-zone size=<guest_memory_region_size>,file=<backing_file>,shared=on|off,hugepages=on|off,hugepage_size=<hugepage_size>,host_numa_node=<node_id>,id=<zone_identifier>,hotplug_size=<hotpluggable_memory_size>,hotplugged_size=<hotplugged_memory_size>,prefault=on|off
+```
+
+### Memory zone parameters
+
+<ParamField path="id" type="string" required>
+  Unique identifier for the memory zone. Used when referencing the zone from `--numa` to assign it to a specific guest NUMA node. Must be unique across all zones.
+</ParamField>
+
+<ParamField path="size" type="u64" required>
+  Size of this memory zone. Accepts `K`, `M`, `G` suffixes.
+</ParamField>
+
+<ParamField path="file" type="path">
+  Path to a file used as the backing store for `mmap(2)`. Useful for backing guest RAM from a known file. During snapshot/restore, if a file path is provided, the snapshot operation skips copying this zone's content (it is already stored on disk).
+</ParamField>
+
+<ParamField path="shared" type="bool" default="off">
+  Map the zone with `MAP_SHARED`. Required for vhost-user device daemons that need to access this memory region. Ignored if `hugepages=on`.
+</ParamField>
+
+<ParamField path="hugepages" type="bool" default="off">
+  Use huge pages for this zone. Implies `MAP_SHARED`. Ensure the host has enough huge pages of the requested size allocated.
+</ParamField>
+
+<ParamField path="hugepage_size" type="u64">
+  Huge page size for this zone. Uses the system default if not specified.
+</ParamField>
+
+<ParamField path="host_numa_node" type="u32">
+  Host NUMA node from which to allocate this zone's memory via `mbind(2)`. Useful for creating VMs with non-uniform memory access patterns that mirror the host NUMA topology.
+</ParamField>
+
+<ParamField path="hotplug_size" type="u64">
+  Amount of memory that can be dynamically added to this zone. Requires `hotplug_method=virtio-mem` in the `--memory` flag.
+</ParamField>
+
+<ParamField path="hotplugged_size" type="u64">
+  Amount of memory to add to this zone at boot. Only valid with `virtio-mem` hotplug and when `hotplug_size` is set. Cannot exceed `hotplug_size`.
+</ParamField>
+
+<ParamField path="prefault" type="bool" default="off">
+  Allocate physical memory and build page tables upfront for this zone.
+</ParamField>
+
+### Memory zone examples
+
+```bash
+# Two zones: one fast, one slow (backed by different NUMA nodes)
+./cloud-hypervisor \
+  --memory size=0 \
+  --memory-zone id=mem0,size=2G,host_numa_node=0 \
+  --memory-zone id=mem1,size=2G,host_numa_node=1 \
+  --kernel ./vmlinux
+```
+
+```bash
+# Zone with a backing file
+./cloud-hypervisor \
+  --memory size=0 \
+  --memory-zone id=mem0,size=1G,file=/mnt/pmem/guest-ram \
+  --kernel ./vmlinux
+```
+
+```bash
+# Zone with virtio-mem hotplug
+./cloud-hypervisor \
+  --memory size=0,hotplug_method=virtio-mem \
+  --memory-zone id=mem0,size=1G,hotplug_size=2G \
+  --kernel ./vmlinux
+```
+
+---
+
+## Examples
+
+<CodeGroup>
+
+```bash Minimal 512M VM (default)
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=512M
+```
+
+```bash 1G with KSM merging
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=1G,mergeable=on
+```
+
+```bash Huge pages for VFIO workloads
+# First allocate huge pages on the host:
+# echo 512 | sudo tee /proc/sys/vm/nr_hugepages
+
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=1G,hugepages=on,hugepage_size=2M
+```
+
+```bash Shared memory for vhost-user devices
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=1G,shared=on
+```
+
+```bash Pre-faulted memory for low-latency workloads
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=4G,prefault=on
+```
+
+```bash ACPI hotplug with 8G headroom
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=1G,hotplug_size=8G \
+  --api-socket=/tmp/ch-socket
+```
+
+</CodeGroup>
+
+<Warning>
+When using `hugepages=on`, ensure the host has sufficient huge pages allocated before starting the VM. Insufficient huge pages can result in obscure errors such as `ReadKernelImage`. Check with `cat /proc/meminfo | grep -i huge`.
+</Warning>

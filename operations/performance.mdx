@@ -1,0 +1,254 @@
+---
+title: "Performance & Metrics"
+description: "Run performance benchmarks, interpret results, and apply configuration options that improve VM throughput, latency, and efficiency."
+---
+
+Cloud Hypervisor ships a `performance-metrics` binary for generating benchmark data in your own environment. This page covers how to run the benchmarks, how to interpret their output, and the key configuration options that affect VM performance.
+
+## Running performance benchmarks
+
+The easiest way to run benchmarks is through the `dev_cli.sh` development script, which runs tests inside a container. The only prerequisite is [Docker](https://docs.docker.com/engine/install/).
+
+<Note>
+The first invocation of `dev_cli.sh` pulls a container image that may be several gigabytes in size.
+</Note>
+
+### Run all performance tests
+
+```bash
+./scripts/dev_cli.sh tests --metrics -- -- --report-file /tmp/metrics.json
+```
+
+This runs the full benchmark suite (boot time, block I/O throughput, network throughput and latency) and writes results to `/tmp/metrics.json`.
+
+### List available tests
+
+```bash
+./scripts/dev_cli.sh tests --metrics -- -- --list-tests
+```
+
+### Run a specific test
+
+```bash
+./scripts/dev_cli.sh tests --metrics -- -- --report-file /tmp/metrics.json --test-filter boot_time
+```
+
+### Customize timeout and iterations
+
+```bash
+./scripts/dev_cli.sh tests --metrics -- -- --timeout 5 --iterations 10
+```
+
+`--timeout` sets the maximum execution time per iteration in seconds. `--iterations` controls how many times each test runs before computing the final result.
+
+## Available performance tests
+
+| Type | Metric | Default timeout (s) | Default iterations |
+|------|--------|--------------------|--------------------|
+| Boot time | `boot_time_ms` | 2 | 10 |
+| | `boot_time_pmem_ms` | 2 | 10 |
+| | `boot_time_16_vcpus_ms` | 2 | 10 |
+| | `boot_time_16_vcpus_pmem_ms` | 2 | 10 |
+| Virtio net | `virtio_net_latency_us` | 10 | 5 |
+| | `virtio_net_throughput_single_queue_rx_gbps` | 10 | 5 |
+| | `virtio_net_throughput_single_queue_tx_gbps` | 10 | 5 |
+| | `virtio_net_throughput_multi_queue_rx_gbps` | 10 | 5 |
+| | `virtio_net_throughput_multi_queue_tx_gbps` | 10 | 5 |
+| Block | `block_read_MiBps` | 10 | 5 |
+| | `block_write_MiBps` | 10 | 5 |
+| | `block_random_read_MiBps` | 10 | 5 |
+| | `block_random_write_MiBps` | 10 | 5 |
+| | `block_multi_queue_read_MiBps` | 10 | 5 |
+| | `block_multi_queue_write_MiBps` | 10 | 5 |
+| | `block_multi_queue_random_read_MiBps` | 10 | 5 |
+| | `block_multi_queue_random_write_MiBps` | 10 | 5 |
+| | `block_read_IOPS` | 10 | 5 |
+| | `block_write_IOPS` | 10 | 5 |
+| | `block_random_read_IOPS` | 10 | 5 |
+| | `block_random_write_IOPS` | 10 | 5 |
+| | `block_multi_queue_read_IOPS` | 10 | 5 |
+| | `block_multi_queue_write_IOPS` | 10 | 5 |
+| | `block_multi_queue_random_read_IOPS` | 10 | 5 |
+| | `block_multi_queue_random_write_IOPS` | 10 | 5 |
+| Other | `restore_latency_time_ms` | 2 | 10 |
+
+## Output format
+
+When `--report-file` is set, results are written as a JSON document:
+
+```json
+{
+  "git_human_readable": "v40.0",
+  "git_revision": "e9b263975786abbf895469b93dfc00f21ce39a88",
+  "git_commit_date": "Fri Jun 21 08:40:44 2024 +0000",
+  "date": "Tue Jul 16 16:35:29 UTC 2024",
+  "results": [
+    {
+      "name": "boot_time_pmem_ms",
+      "mean": 105.9461,
+      "std_dev": 7.140993312558129,
+      "max": 120.01499999999999,
+      "min": 92.37600000000002
+    }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `git_human_readable` | Most recent tag at the time of the run |
+| `git_revision` | Commit SHA of HEAD |
+| `git_commit_date` | Commit date of HEAD |
+| `date` | Timestamp when the benchmark ran |
+| `results` | Array of metric objects with mean, std dev, min, and max |
+
+<Note>
+Benchmark results are environment-specific. Numbers from one machine cannot be directly compared to numbers from another without accounting for hardware differences.
+</Note>
+
+---
+
+## Performance tuning options
+
+### Huge pages
+
+Allocating guest memory with huge pages reduces TLB pressure and can meaningfully improve throughput for memory-intensive workloads, particularly when the guest also uses huge pages internally.
+
+```bash
+--memory size=1G,hugepages=on,hugepage_size=2M
+```
+
+When `hugepages=on` is set, the `shared` option is implicitly enabled and its value is ignored.
+
+<Tip>
+If Cloud Hypervisor fails to allocate with `hugepages=on`, check that the host has enough pre-allocated huge pages. On most systems this is configured via `/proc/sys/vm/nr_hugepages`.
+</Tip>
+
+### Memory hotplug: virtio-mem vs ACPI
+
+Cloud Hypervisor supports two methods for memory hotplug:
+
+- **ACPI hotplug** — the traditional approach; adds memory in coarse-grained DIMM-sized increments.
+- **virtio-mem** — a paravirtualized mechanism that allows finer-grained memory addition and removal, and generally has better performance characteristics for dynamic memory sizing.
+
+```bash
+--memory size=1G,hotplug_method=virtio-mem,hotplug_size=4G
+```
+
+<Tip>
+For workloads that resize memory frequently, `virtio-mem` is preferred over ACPI hotplug due to its lower overhead and finer granularity.
+</Tip>
+
+### CPU affinity
+
+You can pin specific vCPUs to specific host CPU sets. This reduces scheduler jitter and is particularly valuable for latency-sensitive workloads or on NUMA systems where keeping vCPUs on the same NUMA node as their memory improves locality.
+
+```bash
+--cpus boot=3,affinity=[0@[2,3],1@[0,1]]
+```
+
+Affinity supports both explicit lists and ranges:
+
+```bash
+# Pin vCPU 0 to host CPUs 0 through 4
+--cpus boot=1,affinity=0@[0-4]
+
+# Pin vCPU 0 to host CPUs 0-99 and also CPU 255
+--cpus boot=1,affinity=0@[0-99,255]
+```
+
+### I/O throttling
+
+Cloud Hypervisor supports rate limiting on virtio-block and virtio-net devices, controlling both bandwidth (bytes/s) and operation rate (ops/s) independently.
+
+#### Per-device throttling
+
+Throttle a single disk to limit bandwidth:
+
+```bash
+--disk path=disk.raw,bw_size=104857600,bw_refill_time=1000
+```
+
+Key parameters:
+
+| Parameter | Unit | Description |
+|-----------|------|-------------|
+| `bw_size` | bytes | Token bucket capacity; determines sustained bandwidth |
+| `bw_refill_time` | ms | Interval over which `bw_size` bytes are replenished |
+| `bw_one_time_burst` | bytes | Optional initial burst allowance before rate limiting kicks in |
+| `ops_size` | I/O ops | Token bucket capacity for operation rate |
+| `ops_refill_time` | ms | Refill interval for the ops bucket |
+| `ops_one_time_burst` | I/O ops | Optional initial burst for ops |
+
+<Warning>
+When the token bucket empties, I/O is paused for a fixed `cool_down_time` of 100 ms. This means the actual sustained rate can be lower than the nominal refill rate. Specifically, the effective rate is approximately `size / (refill_time + 100ms)`. To keep actual throughput close to the intended limit, set `bw_refill_time` or `ops_refill_time` to values well above 100 ms.
+
+For example, to get ~1000 IOPS, use `ops_size=1000,ops_refill_time=1000` rather than `ops_size=10,ops_refill_time=10`. The latter will yield ~100 IOPS due to the cool-down penalty.
+</Warning>
+
+#### Rate limit groups
+
+Multiple virtio-block devices can share a single aggregate rate limit using `rate_limit_group`. Devices can be added and removed from a group dynamically.
+
+```bash
+--disk path=disk0.raw,rate_limit_group=group0 \
+       path=disk1.raw,rate_limit_group=group0 \
+--rate-limit-group bw_size=1048576,bw_refill_time=100
+```
+
+This caps the combined throughput of `disk0.raw` and `disk1.raw` to approximately 10 MiB/s.
+
+---
+
+## Profiling
+
+Cloud Hypervisor can be profiled with `perf`. Because the default release binary strips symbol information, a dedicated build profile is needed.
+
+### Building a profilable binary
+
+```bash
+cargo clean && RUSTFLAGS='-C force-frame-pointers=y' cargo build --profile profiling
+```
+
+This adds symbol information and frame pointers without otherwise affecting performance characteristics.
+
+### Recording a profile
+
+```bash
+perf record -g target/profiling/cloud-hypervisor \
+    --kernel ~/src/linux/vmlinux \
+    --pmem file=~/workloads/focal.raw \
+    --cpus boot=1 --memory size=1G \
+    --cmdline "root=/dev/pmem0p1 console=ttyS0" \
+    --serial tty --console off \
+    --api-socket=/tmp/api1
+```
+
+### Analyzing samples
+
+```bash
+perf report -g
+```
+
+### Userspace-only profiling with LBR
+
+If you only need userspace profiling, Last Branch Record (LBR) sampling offers lower overhead and a higher effective sampling frequency. LBR is available on Intel processors since Haswell.
+
+```bash
+perf record --call-graph lbr --all-user --user-callchains -g \
+    target/release/cloud-hypervisor \
+    --kernel ~/src/linux/vmlinux \
+    --pmem file=~/workloads/focal.raw \
+    --cpus boot=1 --memory size=1G \
+    --cmdline "root=/dev/pmem0p1 console=ttyS0" \
+    --serial tty --console off \
+    --api-socket=/tmp/api1
+```
+
+<Note>
+LBR profiling does not require building with custom `RUSTFLAGS`, but debug symbols should still be present in the binary for useful stack traces.
+</Note>
+
+<Note>
+If profiling with a network device attached, either pre-create and configure the TAP device before running `perf record`, or run as root so Cloud Hypervisor can create the TAP device itself.
+</Note>

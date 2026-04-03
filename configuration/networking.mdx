@@ -1,0 +1,291 @@
+---
+title: "Network Configuration"
+description: "Configure virtio-net networking for Cloud Hypervisor VMs using TAP interfaces, macvtap bridging, and vhost-user-net with DPDK offload."
+---
+
+Cloud Hypervisor provides network connectivity through the `--net` flag, which creates a `virtio-net` device backed by a TAP interface on the host. Multiple network devices can be added by repeating the `--net` flag. For advanced offload scenarios, `vhost-user-net` (e.g. DPDK/OVS) is also supported.
+
+## NetConfig struct
+
+```rust
+pub struct NetConfig {
+    pub tap: Option<String>,
+    pub ip: Option<IpAddr>,
+    pub mask: Option<IpAddr>,
+    pub mac: MacAddr,
+    pub host_mac: Option<MacAddr>,
+    pub mtu: Option<u16>,
+    pub iommu: bool,
+    pub num_queues: usize,      // default: 2
+    pub queue_size: u16,        // default: 256
+    pub vhost_user: bool,
+    pub vhost_socket: Option<String>,
+    pub vhost_mode: VhostMode,
+    pub id: Option<String>,
+    pub fds: Option<Vec<i32>>,
+    pub rate_limiter_config: Option<RateLimiterConfig>,
+    pub pci_segment: u16,
+    pub offload_tso: bool,      // default: true
+    pub offload_ufo: bool,      // default: true
+    pub offload_csum: bool,     // default: true
+}
+```
+
+## CLI syntax
+
+```
+--net tap=<tap_name>,ip=<ip_addr>,mask=<net_mask>,mac=<guest_mac>,iommu=on|off,num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,vhost_user=on|off,socket=<vhost_socket_path>,id=<device_id>,pci_segment=<segment_id>
+```
+
+## Parameters
+
+<ParamField path="tap" type="string">
+  Name of the host TAP interface to use. If not specified, Cloud Hypervisor creates and configures a TAP interface automatically (requires `CAP_NET_ADMIN`). If a TAP name is provided, the interface must already exist and be configured on the host.
+</ParamField>
+
+<ParamField path="ip" type="IpAddr">
+  IPv4 address assigned to the automatically created TAP interface on the host side. Only used when `tap` is not specified and Cloud Hypervisor manages the TAP interface.
+</ParamField>
+
+<ParamField path="mask" type="IpAddr">
+  Network mask for the host-side TAP interface IP address. Only used when Cloud Hypervisor manages the TAP interface.
+</ParamField>
+
+<ParamField path="mac" type="MacAddr">
+  MAC address assigned to the guest-side virtio-net device. If not specified, a random locally-administered MAC address is generated.
+</ParamField>
+
+<ParamField path="iommu" type="bool" default="off">
+  Attach this network device to the paravirtualized IOMMU (`virtio-iommu`). Enabling IOMMU on any device activates the virtual IOMMU device for the VM. Useful for nested virtualization and security-sensitive environments.
+</ParamField>
+
+<ParamField path="num_queues" type="usize" default="2">
+  Number of virtio queue pairs (each pair consists of one TX and one RX queue). Setting this above 2 enables multi-queue networking. Must be an even number. Increase for workloads with high network parallelism.
+</ParamField>
+
+<ParamField path="queue_size" type="u16" default="256">
+  Size of each virtio queue in descriptors. Larger values allow more requests to be outstanding simultaneously, which can improve throughput at the cost of higher memory usage.
+</ParamField>
+
+<ParamField path="vhost_user" type="bool" default="off">
+  Use vhost-user backend instead of the built-in virtio-net emulation. When enabled, `socket` must also be provided pointing to a running vhost-user-net backend (e.g. DPDK).
+</ParamField>
+
+<ParamField path="socket" type="path">
+  Path to the vhost-user socket. Required when `vhost_user=true`. The socket is created by the external backend (e.g. OVS/DPDK).
+</ParamField>
+
+<ParamField path="id" type="string">
+  Unique identifier for this network device. Used to reference the device in hotplug operations via `ch-remote`. If not specified, Cloud Hypervisor assigns one automatically (e.g. `_net0`).
+</ParamField>
+
+<ParamField path="pci_segment" type="u16" default="0">
+  PCI segment number to assign this device to. Cloud Hypervisor supports multiple PCI segments. Use with `--platform num_pci_segments=N` to enable additional segments.
+</ParamField>
+
+---
+
+## TAP interface setup
+
+Cloud Hypervisor needs `CAP_NET_ADMIN` to create and configure TAP interfaces automatically.
+
+```bash
+# Grant the binary the capability (once per binary, survives updates)
+sudo setcap cap_net_admin+ep ./cloud-hypervisor
+
+# Auto-managed TAP — Cloud Hypervisor creates the interface
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=1G \
+  --net "tap=,mac=,ip=,mask="
+```
+
+To use a pre-existing TAP interface:
+
+```bash
+# Create and configure the TAP manually
+sudo ip tuntap add dev chtap0 mode tap
+sudo ip addr add 192.168.100.1/24 dev chtap0
+sudo ip link set chtap0 up
+
+# Reference it by name
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=1G \
+  --net tap=chtap0,mac=52:54:00:11:22:33
+```
+
+---
+
+## Macvtap bridging
+
+Macvtap places the guest directly on the same L2 network as the host. This is useful when the guest needs a routable IP from the host network (e.g. via DHCP from the upstream router).
+
+<Warning>
+Due to the lack of hairpin mode in macvtap, direct communication between the host and guest is not possible when using macvtap bridging.
+</Warning>
+
+```bash
+mac="c2:67:4f:53:29:cb"
+host_net="eno1"
+
+# Create macvtap interface bridged to the host network adapter
+sudo ip link add link "$host_net" name macvtap0 type macvtap
+sudo ip link set macvtap0 address "$mac" up
+sudo ip link show macvtap0
+
+# Find the character device for this interface
+tapindex=$(< /sys/class/net/macvtap0/ifindex)
+tapdevice="/dev/tap$tapindex"
+sudo chown "$UID:$UID" "$tapdevice"
+
+# Pass fd=3 to Cloud Hypervisor — the shell opens the device on fd 3
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --cpus boot=1 \
+  --memory size=512M \
+  --cmdline "root=/dev/vda1 console=hvc0" \
+  --net fd=3,mac=$mac 3<>"$tapdevice"
+```
+
+The guest obtains an IP from the upstream network (including via DHCP if available).
+
+---
+
+## vhost-user-net with DPDK/OVS
+
+For high-performance networking workloads, Cloud Hypervisor supports `vhost-user-net` backends. The virtio datapath is offloaded to an external process (e.g. OVS/DPDK), which handles packet I/O.
+
+<Note>
+vhost-user requires the guest memory to be shared. Use `--memory shared=on` (or `hugepages=on`) when enabling vhost-user networking.
+</Note>
+
+### OVS/DPDK setup
+
+```bash
+# Load the OVS kernel module and start the service
+modprobe openvswitch
+sudo service openvswitch-switch start
+
+# Configure OVS with DPDK
+ovs-vsctl init
+ovs-vsctl set Open_vSwitch . other_config:dpdk-init=true
+ovs-vsctl set Open_vSwitch . other_config:dpdk-lcore-mask=0xf
+ovs-vsctl set Open_vSwitch . other_config:dpdk-socket-mem=1024
+ovs-vsctl set Open_vSwitch . other_config:pmd-cpu-mask=0xf
+sudo service openvswitch-switch restart
+
+# Create a bridge and add two DPDK vhost-user ports
+ovs-vsctl add-br ovsbr0 -- set bridge ovsbr0 datapath_type=netdev
+ovs-vsctl add-port ovsbr0 vhost-user1 \
+  -- set Interface vhost-user1 type=dpdkvhostuserclient \
+     options:vhost-server-path=/tmp/vhost-user1
+ovs-vsctl add-port ovsbr0 vhost-user2 \
+  -- set Interface vhost-user2 type=dpdkvhostuserclient \
+     options:vhost-server-path=/tmp/vhost-user2
+ovs-vsctl set Interface vhost-user1 options:n_rxq=2
+ovs-vsctl set Interface vhost-user2 options:n_rxq=2
+```
+
+### Launch VMs with vhost-user-net
+
+```bash
+# VM 1 — connects to OVS port 1 (server mode, 4 queues = 2 queue pairs)
+./cloud-hypervisor \
+  --cpus boot=2 \
+  --memory size=512M,hugepages=on,shared=true \
+  --kernel vmlinux \
+  --cmdline "console=ttyS0 console=hvc0 root=/dev/vda1 rw" \
+  --disk path=focal-server-cloudimg-amd64.raw \
+  --net mac=52:54:00:02:d9:01,vhost_user=true,socket=/tmp/vhost-user1,num_queues=4,vhost_mode=server
+
+# VM 2 — connects to OVS port 2
+./cloud-hypervisor \
+  --cpus boot=2 \
+  --memory size=512M,hugepages=on,shared=true \
+  --kernel vmlinux \
+  --cmdline "console=ttyS0 console=hvc0 root=/dev/vda1 rw" \
+  --disk path=focal-server-cloudimg-amd64.raw \
+  --net mac=52:54:20:11:C5:02,vhost_user=true,socket=/tmp/vhost-user2,num_queues=4,vhost_mode=server
+```
+
+---
+
+## Multiple network devices
+
+Multiple `--net` flags add multiple virtio-net devices to the VM:
+
+```bash
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=2G \
+  --net tap=chtap0,mac=52:54:00:11:22:33 \
+  --net tap=chtap1,mac=52:54:00:44:55:66
+```
+
+---
+
+## Network device hotplug
+
+Network devices can be added to a running VM via the HTTP API:
+
+```bash
+# Start VM with API socket
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --memory size=1G \
+  --api-socket=/tmp/ch-socket
+
+# Add a network device at runtime
+./ch-remote --api-socket=/tmp/ch-socket add-net tap=chtap0
+```
+
+---
+
+## Examples
+
+<CodeGroup>
+
+```bash Auto-managed TAP interface
+sudo setcap cap_net_admin+ep ./cloud-hypervisor
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --cpus boot=4 \
+  --memory size=1024M \
+  --net "tap=,mac=,ip=,mask="
+```
+
+```bash Specific MAC and TAP name
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --cpus boot=2 \
+  --memory size=1G \
+  --net tap=chtap0,mac=52:54:00:01:02:03
+```
+
+```bash Multi-queue for high throughput
+./cloud-hypervisor \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --cpus boot=8 \
+  --memory size=4G \
+  --net tap=chtap0,num_queues=8,queue_size=512
+```
+
+```bash vhost-user-net with DPDK
+./cloud-hypervisor \
+  --cpus boot=2 \
+  --memory size=1G,hugepages=on,shared=true \
+  --kernel ./vmlinux \
+  --disk path=focal.raw \
+  --net vhost_user=true,socket=/tmp/vhost-user1,num_queues=4,mac=52:54:00:02:d9:01,vhost_mode=server
+```
+
+</CodeGroup>

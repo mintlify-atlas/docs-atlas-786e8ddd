@@ -1,0 +1,109 @@
+---
+title: "Landlock Sandboxing"
+description: "How Cloud Hypervisor uses the Linux Landlock security module to restrict filesystem access to only the paths a VM needs."
+---
+
+Landlock is a Linux kernel security module that allows unprivileged applications to sandbox themselves by restricting their own filesystem access. Once a Landlock ruleset is applied, the process cannot access any paths outside of that ruleset for the rest of its lifetime—even if it is later compromised.
+
+Cloud Hypervisor uses Landlock to limit the set of files and directories the VMM process can access. At VM creation time, Cloud Hypervisor builds a ruleset covering all file-backed resources the VM will use (disk images, kernel binaries, firmware, etc.) and locks itself to that set.
+
+<Note>
+Landlock currently permits some additional accesses beyond strict `read`/`write` under its access model (for example, access to extended file attributes is currently always allowed). This is a Landlock limitation that will narrow over time as the kernel module matures.
+</Note>
+
+## Host requirements
+
+Landlock must be enabled in the host kernel. To check whether it is active:
+
+```bash
+sudo dmesg | grep -w landlock
+```
+
+If Landlock is running, you will see:
+
+```
+[    0.000000] landlock: Up and running.
+```
+
+If it is not present, follow the [kernel Landlock documentation](https://docs.kernel.org/userspace-api/landlock.html#kernel-support) to enable it in your kernel configuration.
+
+## Enabling Landlock
+
+Landlock is applied at the `vm_create` stage of the boot sequence, because Cloud Hypervisor needs the complete list of file paths it will access before the ruleset can be locked.
+
+### Command line
+
+Append `--landlock` to the Cloud Hypervisor command line:
+
+```bash
+./cloud-hypervisor \
+    --kernel ./linux-cloud-hypervisor/arch/x86/boot/compressed/vmlinux.bin \
+    --disk path=focal-server-cloudimg-amd64.raw path=/tmp/ubuntu-cloudinit.img \
+    --cmdline "console=hvc0 root=/dev/vda1 rw" \
+    --cpus boot=4 \
+    --memory size=1024M \
+    --net "tap=,mac=,ip=,mask=" \
+    --landlock
+```
+
+<Warning>
+With Landlock enabled and no `--landlock-rules` specified, any attempt to hotplug a file-backed device after boot will result in a **Permission Denied** error, because the new path falls outside the locked ruleset.
+</Warning>
+
+### API
+
+Landlock can also be enabled via the `vm.create` API request:
+
+```json
+{
+    "landlock_enable": true,
+    "landlock_rules": [
+        {
+            "path": "/tmp/disk1",
+            "access": "rw"
+        },
+        {
+            "path": "/tmp/disk2",
+            "access": "rw"
+        }
+    ]
+}
+```
+
+## Hotplug support
+
+If you need to hotplug file-backed devices after the VM starts, declare the additional paths with `--landlock-rules` before boot. These paths are added to the ruleset at `vm_create` time so they are available when needed later.
+
+`--landlock-rules` accepts both file paths and directory paths.
+
+```bash
+./cloud-hypervisor \
+    --api-socket /tmp/ch.socket \
+    --kernel ./linux-cloud-hypervisor/arch/x86/boot/compressed/vmlinux.bin \
+    --disk path=focal-server-cloudimg-amd64.raw path=/tmp/ubuntu-cloudinit.img \
+    --cmdline "console=hvc0 root=/dev/vda1 rw" \
+    --cpus boot=4 \
+    --memory size=1024M \
+    --net "tap=,mac=,ip=,mask=" \
+    --landlock \
+    --landlock-rules path="/path/to/hotplug1",access="rw" path="/path/to/hotplug2",access="rw"
+```
+
+Then hotplug the device at runtime:
+
+```bash
+./ch-remote --api-socket /tmp/ch.socket \
+    add-disk "path=/path/to/hotplug/blk.raw"
+```
+
+## Development considerations
+
+<Tip>
+When developing features that access new paths, add those paths to `--landlock-rules` during testing. This lets you verify that Landlock does not interfere with the new code path before enabling it in production.
+</Tip>
+
+If you encounter unexpected permission errors with Landlock enabled:
+
+1. Check whether the denied path was known at `vm_create` time.
+2. If it is a path needed for hotplug, add it to `--landlock-rules`.
+3. If it is an unexpected internal path, investigate whether Cloud Hypervisor's Landlock ruleset construction needs to be updated to cover the new access pattern.

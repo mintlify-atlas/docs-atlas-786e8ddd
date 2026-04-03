@@ -1,0 +1,292 @@
+---
+title: "Hotplug"
+description: "Dynamically add and remove CPUs, memory, and PCI devices from a running Cloud Hypervisor VM using the ACPI GED and the HTTP API."
+---
+
+Cloud Hypervisor supports hot plugging of CPUs (x86 only), PCI devices, and memory resizing on running VM instances. All hotplug operations are driven through the HTTP API socket exposed by `ch-remote`.
+
+## Kernel Support
+
+Hotplug requires ACPI GED (Generic Event Device) support in the guest kernel. This can be achieved in one of two ways:
+
+<CardGroup cols={2}>
+  <Card title="Kernel config flag">
+    Enable `CONFIG_ACPI_REDUCED_HARDWARE_ONLY` when building the guest kernel.
+  </Card>
+  <Card title="Upstream kernel patch">
+    Use a kernel at v5.5-rc1 or later, which includes the required ACPI GED driver patch upstream.
+  </Card>
+</CardGroup>
+
+<Note>
+  On AArch64, PCI device hotplug is only achievable using ACPI. Refer to the UEFI documentation for AArch64-specific firmware requirements.
+</Note>
+
+---
+
+## CPU Hotplug
+
+Extra vCPUs can be added to or removed from a running Cloud Hypervisor instance. Two mechanisms control this:
+
+1. Set a `max` vCPU count greater than the `boot` count when starting the VM.
+2. Issue an HTTP API request via `ch-remote` to resize the active vCPU count.
+
+<Steps>
+  <Step title="Start the VM with max vCPUs">
+    Launch Cloud Hypervisor specifying both `boot` and `max` CPU counts. Include `--api-socket` so the HTTP server is reachable.
+
+    ```shell
+    sudo setcap cap_net_admin+ep ./cloud-hypervisor/target/release/cloud-hypervisor
+
+    ./cloud-hypervisor/target/release/cloud-hypervisor \
+        --kernel custom-vmlinux.bin \
+        --cmdline "console=ttyS0 console=hvc0 root=/dev/vda1 rw" \
+        --disk path=focal-server-cloudimg-amd64.raw \
+        --cpus boot=4,max=8 \
+        --memory size=1024M \
+        --net "tap=,mac=,ip=,mask=" \
+        --rng \
+        --api-socket=/tmp/ch-socket
+    ```
+  </Step>
+
+  <Step title="Request additional vCPUs via the resize API">
+    Use `ch-remote` to increase the active vCPU count up to the `max` value:
+
+    ```shell
+    ./ch-remote --api-socket=/tmp/ch-socket resize --cpus 8
+    ```
+
+    The VMM creates the additional vCPU threads and advertises them to the running kernel.
+  </Step>
+
+  <Step title="Online the new CPUs inside the guest">
+    The kernel does not bring up hotplugged CPUs automatically. Online them from inside the VM:
+
+    ```shell
+    # Check current CPU state
+    lscpu | grep list:
+    # On-line CPU(s) list:   0-3
+    # Off-line CPU(s) list:  4-7
+
+    # Bring the new CPUs online
+    echo 1 | tee /sys/devices/system/cpu/cpu[4,5,6,7]/online
+
+    # Verify
+    lscpu | grep list:
+    # On-line CPU(s) list:   0-7
+    ```
+
+    The added CPUs persist across reboots.
+  </Step>
+
+  <Step title="Remove vCPUs (optional)">
+    Reduce the vCPU count by passing a lower value. CPUs are automatically offlined inside the guest — no manual guest-side commands are needed:
+
+    ```shell
+    ./ch-remote --api-socket=/tmp/ch-socket resize --cpus 2
+    ```
+
+    The reduced count takes effect immediately and persists after reboot.
+  </Step>
+</Steps>
+
+---
+
+## Memory Hotplug
+
+Cloud Hypervisor supports two methods for hotplugging memory: the ACPI method (default) and the `virtio-mem` method. Both require reserving address space via the `hotplug_size` parameter at boot.
+
+<Tabs>
+  <Tab title="ACPI Method (default)">
+    <Steps>
+      <Step title="Start the VM with hotplug_size">
+        Reserve guest physical address space for future hotplug. Make `hotplug_size` larger than the maximum RAM you expect to add, due to alignment requirements.
+
+        ```shell
+        sudo setcap cap_net_admin+ep ./cloud-hypervisor/target/release/cloud-hypervisor
+
+        ./cloud-hypervisor/target/release/cloud-hypervisor \
+            --kernel custom-vmlinux.bin \
+            --cmdline "console=ttyS0 console=hvc0 root=/dev/vda1 rw" \
+            --disk path=focal-server-cloudimg-amd64.raw \
+            --cpus boot=4,max=8 \
+            --memory size=1024M,hotplug_size=8192M \
+            --net "tap=,mac=,ip=,mask=" \
+            --rng \
+            --api-socket=/tmp/ch-socket
+        ```
+
+        <Note>
+          The `hotplug_method=acpi` option is the default and does not need to be specified explicitly.
+        </Note>
+      </Step>
+
+      <Step title="Enable automatic memory onlining in the guest">
+        Run this inside the VM before issuing the resize request:
+
+        ```shell
+        echo online | sudo tee /sys/devices/system/memory/auto_online_blocks
+        ```
+      </Step>
+
+      <Step title="Expand RAM via the API">
+        ```shell
+        ./ch-remote --api-socket=/tmp/ch-socket resize --memory 3G
+        ```
+
+        Verify inside the guest:
+
+        ```shell
+        free -h
+        #               total        used        free      shared  buff/cache   available
+        # Mem:          3.0Gi        71Mi       2.8Gi       0.0Ki        47Mi       2.8Gi
+        ```
+
+        <Warning>
+          The amount of memory added (delta between current and desired) must be a multiple of 128 MiB due to guest OS alignment requirements.
+        </Warning>
+      </Step>
+    </Steps>
+
+    <Note>
+      Reducing memory size via the API schedules the change for the next reboot; it does not take effect immediately.
+    </Note>
+  </Tab>
+
+  <Tab title="virtio-mem Method">
+    The `virtio-mem` method supports both adding **and** removing memory from a running VM.
+
+    <Steps>
+      <Step title="Start the VM with virtio-mem">
+        Set `hotplug_method=virtio-mem` in the memory configuration:
+
+        ```shell
+        sudo setcap cap_net_admin+ep ./cloud-hypervisor/target/release/cloud-hypervisor
+
+        ./cloud-hypervisor/target/release/cloud-hypervisor \
+            --kernel custom-vmlinux.bin \
+            --cmdline "console=ttyS0 console=hvc0 root=/dev/vda1 rw" \
+            --disk path=focal-server-cloudimg-amd64.raw \
+            --memory size=1024M,hotplug_size=8192M,hotplug_method=virtio-mem \
+            --net "tap=,mac=,ip=,mask=" \
+            --api-socket=/tmp/ch-socket
+        ```
+      </Step>
+
+      <Step title="Expand RAM via the API">
+        ```shell
+        ./ch-remote --api-socket=/tmp/ch-socket resize --memory 3G
+        ```
+
+        Verify inside the guest:
+
+        ```shell
+        free -h
+        #               total        used        free      shared  buff/cache   available
+        # Mem:          3.0Gi        71Mi       2.8Gi       0.0Ki        47Mi       2.8Gi
+        ```
+      </Step>
+
+      <Step title="Reduce RAM via the API (optional)">
+        With `virtio-mem`, memory can also be removed from a running VM:
+
+        ```shell
+        ./ch-remote --api-socket=/tmp/ch-socket resize --memory 1G
+        ```
+
+        <Note>
+          Memory removal may only partially succeed if the guest is actively using the memory being reclaimed.
+        </Note>
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+<Tip>
+  CPU and memory resize operations can be combined into a single API request.
+</Tip>
+
+---
+
+## PCI Device Hotplug
+
+Extra PCI devices can be added to or removed from a running VM. Start the VM with `--api-socket` to enable the HTTP server.
+
+```shell
+sudo setcap cap_net_admin+ep ./cloud-hypervisor/target/release/cloud-hypervisor
+
+./cloud-hypervisor/target/release/cloud-hypervisor \
+    --kernel custom-vmlinux.bin \
+    --cmdline "console=ttyS0 console=hvc0 root=/dev/vda1 rw" \
+    --disk path=focal-server-cloudimg-amd64.raw \
+    --cpus boot=4 \
+    --memory size=1024M \
+    --net "tap=,mac=,ip=,mask=" \
+    --api-socket=/tmp/ch-socket
+```
+
+### Adding Devices
+
+<Steps>
+  <Step title="Add a VFIO device">
+    Pass a host PCI device (bound to `vfio-pci`) into the running VM:
+
+    ```shell
+    ./ch-remote --api-socket=/tmp/ch-socket add-device path=/sys/bus/pci/devices/0000:01:00.0/
+    ```
+  </Step>
+
+  <Step title="Add a disk device">
+    ```shell
+    ./ch-remote --api-socket=/tmp/ch-socket add-disk path=/foo/bar/cloud.img
+    ```
+  </Step>
+
+  <Step title="Add a virtio-fs device">
+    ```shell
+    ./ch-remote --api-socket=/tmp/ch-socket add-fs tag=myfs,socket=/foo/bar/virtiofs.sock
+    ```
+  </Step>
+
+  <Step title="Add a network device">
+    ```shell
+    ./ch-remote --api-socket=/tmp/ch-socket add-net tap=chtap0
+    ```
+  </Step>
+
+  <Step title="Add a PMEM device">
+    ```shell
+    ./ch-remote --api-socket=/tmp/ch-socket add-pmem file=/foo/bar.cloud.img
+    ```
+  </Step>
+
+  <Step title="Add a vsock device">
+    ```shell
+    ./ch-remote --api-socket=/tmp/ch-socket add-vsock cid=3,socket=/foo/bar/vsock.sock
+    ```
+  </Step>
+</Steps>
+
+After a device is added, the guest kernel detects it on its PCI bus:
+
+```shell
+# Inside the guest
+lspci
+# 00:00.0 Host bridge: Intel Corporation Device 0d57
+# 00:01.0 Unassigned class [ffff]: Red Hat, Inc. Virtio console (rev 01)
+# 00:02.0 Mass storage controller: Red Hat, Inc. Virtio block device (rev 01)
+# 00:03.0 Unassigned class [ffff]: Red Hat, Inc. Virtio RNG (rev 01)
+```
+
+Added devices persist across reboots.
+
+### Removing Devices
+
+Removal works the same way for all PCI device types. Supply the device identifier (user-assigned or the default assigned by Cloud Hypervisor):
+
+```shell
+./ch-remote --api-socket=/tmp/ch-socket remove-device _disk0
+```
+
+The device is removed immediately and the change persists after reboot.

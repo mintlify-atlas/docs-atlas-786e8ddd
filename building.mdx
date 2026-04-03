@@ -1,0 +1,135 @@
+---
+title: "Building from Source"
+description: "How to compile Cloud Hypervisor from source, including static musl builds and containerized build environments."
+---
+
+Pre-built static binaries are available for every release and are the recommended way to get started. Building from source is only necessary if you want to **modify the Cloud Hypervisor code** or need a build configuration not covered by the released binaries.
+
+<Steps>
+  <Step title="Install prerequisites">
+    Install system packages and the Rust toolchain. The steps below are for Ubuntu; replace the package manager and package names for other distributions.
+
+    ```bash
+    # Install system dependencies
+    sudo apt-get update
+    sudo apt install git build-essential m4 bison flex uuid-dev qemu-utils musl-tools
+    ```
+
+    Install the Rust toolchain using `rustup`:
+
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    ```
+
+    Follow the on-screen prompts and then reload your shell environment:
+
+    ```bash
+    source "$HOME/.cargo/env"
+    ```
+
+    <Note>
+      `musl-tools` is required if you intend to produce statically linked binaries using the `musl` target (see Step 4). If you only need a dynamically linked debug or release build you can omit it from the `apt install` command.
+    </Note>
+  </Step>
+
+  <Step title="Clone and build">
+    Set up a working directory, clone the repository, and build a release binary:
+
+    ```bash
+    export CLOUDH=$HOME/cloud-hypervisor
+    mkdir $CLOUDH
+
+    pushd $CLOUDH
+    git clone https://github.com/cloud-hypervisor/cloud-hypervisor.git
+    cd cloud-hypervisor
+
+    cargo build --release
+    ```
+
+    The resulting binary is at:
+
+    ```
+    $CLOUDH/cloud-hypervisor/target/release/cloud-hypervisor
+    ```
+  </Step>
+
+  <Step title="Set the NET_ADMIN capability">
+    Cloud Hypervisor needs the `NET_ADMIN` capability to configure TAP network interfaces on the host. Grant it to the binary so you can run without `sudo`:
+
+    ```bash
+    sudo setcap cap_net_admin+ep ./target/release/cloud-hypervisor
+    ```
+
+    You must re-run this command each time you rebuild the binary, because the capability is stored on the file and a new build replaces the file.
+  </Step>
+
+  <Step title="Build static binaries (musl)">
+    Static binaries link against `musl libc` instead of `glibc`, producing a single self-contained executable with no shared-library dependencies. This is what the official GitHub release artifacts (`cloud-hypervisor-static` / `cloud-hypervisor-static-aarch64`) are built with.
+
+    Add the musl target(s) to your Rust toolchain:
+
+    <Tabs>
+      <Tab title="x86-64">
+        ```bash
+        rustup target add x86_64-unknown-linux-musl
+        ```
+
+        Build:
+
+        ```bash
+        cargo build --release --target=x86_64-unknown-linux-musl --all
+        ```
+
+        The binary is at:
+        `target/x86_64-unknown-linux-musl/release/cloud-hypervisor`
+      </Tab>
+      <Tab title="AArch64">
+        ```bash
+        rustup target add aarch64-unknown-linux-musl
+        ```
+
+        Build:
+
+        ```bash
+        cargo build --release --target=aarch64-unknown-linux-musl --all
+        ```
+
+        The binary is at:
+        `target/aarch64-unknown-linux-musl/release/cloud-hypervisor`
+      </Tab>
+    </Tabs>
+
+    <Note>
+      Cross-compiling musl binaries for a different architecture than the host requires a cross-linker. The containerized build described below handles this automatically.
+    </Note>
+  </Step>
+</Steps>
+
+## Containerized builds and tests
+
+If you don't want to install the Rust toolchain and all build dependencies on your host, Cloud Hypervisor ships a development script — `dev_cli.sh` — that runs builds and tests inside a Docker container.
+
+<Note>
+  On first use, `dev_cli.sh` will pull a container image that includes the full build environment. This image is several hundred megabytes; allow time for the initial download.
+</Note>
+
+### Build a release binary
+
+```bash
+pushd $CLOUDH/cloud-hypervisor
+./scripts/dev_cli.sh build --release
+```
+
+### Run unit tests
+
+```bash
+./scripts/dev_cli.sh tests --unit
+```
+
+### View all available commands
+
+```bash
+./scripts/dev_cli.sh --help
+```
+
+This is also the recommended way to run the Cloud Hypervisor CI locally, which is useful for debugging CI failures without relying on the remote CI infrastructure.
